@@ -556,7 +556,8 @@ export default function App() {
     });
     Object.entries(salesRecords).forEach(([key, val]) => {
       if (key.startsWith(currentMonthPrefix)) {
-        const [, stId] = key.split('_');
+        const parts = key.split('_');
+        const stId = parts.slice(1).join('_');
         if (byStore[stId] !== undefined) {
           byStore[stId] += Number(val.amount) || 0;
         }
@@ -1106,7 +1107,9 @@ export default function App() {
                           })
                           .sort((a, b) => b[0].localeCompare(a[0]))
                           .map(([key, rec]) => {
-                            const [dt, stId] = key.split('_');
+                           const parts = key.split('_');
+                            const dt = parts[0];
+                            const stId = parts.slice(1).join('_');
                             const stName = stores.find((s) => s.id === stId)?.name || stId;
                             return (
                               <tr key={key} className="border-b border-slate-100">
