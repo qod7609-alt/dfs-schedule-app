@@ -614,19 +614,17 @@ export default function App() {
       });
 
       if (workingOnDay.length === 0) return;
-      const perPersonShare = daySales / workingOnDay.length;
-      const perPersonQtyShare = dayQty / workingOnDay.length;
 
       workingOnDay.forEach((stf) => {
         const shift = schedules[dateStr + '_' + stf.id];
         const entry = statsByStaff[stf.id];
         if (!entry) return;
-        entry.totalAllocated += perPersonShare;
-        entry.totalAllocatedQty += perPersonQtyShare;
+        entry.totalAllocated += daySales;
+        entry.totalAllocatedQty += dayQty;
         entry.workDaysCount += 1;
         if (entry.groupStats[shift]) {
-          entry.groupStats[shift].sum += perPersonShare;
-          entry.groupStats[shift].qtySum += perPersonQtyShare;
+          entry.groupStats[shift].sum += daySales;
+          entry.groupStats[shift].qtySum += dayQty;
           entry.groupStats[shift].count += 1;
         }
       });
@@ -1181,7 +1179,7 @@ export default function App() {
                   {year}년 {month + 1}월 판매사원별 출근 배분 매출(USD) · 수량 및 조별(A/B/C/F) 평균
                 </h3>
                 <p className="text-xs text-slate-500">
-                  해당 일자 매장에 A·B·C·F조로 출근한 인원에게 당일 매출(USD)과 판매 수량(PCS)을 균등 배분해 사원별 누적·평균 및 조별 평균 매출을 집계합니다.
+                  해당 일자 매장에 A·B·C·F조로 출근한 모든 사원에게 당일 매장 전체 매출(USD)과 판매 수량(PCS)을 동일하게 부여하여 사원별 누적·평균 및 조별 평균 매출을 집계합니다.
                 </p>
               </div>
               <div className="overflow-x-auto">
