@@ -3,7 +3,7 @@ import {
   Calendar as CalendarIcon, Users, Store, TrendingUp, Clock, Lock, Unlock,
   LogOut, Plus, Trash2, CheckCircle2, XCircle, Edit3, KeyRound, ChevronLeft,
   ChevronRight, AlertCircle, ShieldCheck, UserCheck, FileSpreadsheet,
-  Download, ShieldAlert
+  Download, ShieldAlert, Send, RotateCcw
 } from 'lucide-react';
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
@@ -235,15 +235,33 @@ export default function App() {
     setLoginError('');
   };
 
+  const getStoreApprovalInfo = (storeId) => {
+    if (!storeId) return { status: 'DRAFT', approved: false };
+    const raw = scheduleApprovals[currentMonthPrefix + '_' + storeId];
+    if (!raw) return { status: 'DRAFT', approved: false };
+    if (raw.status) {
+      return { ...raw, approved: raw.status === 'APPROVED' };
+    }
+    return {
+      ...raw,
+      status: raw.approved ? 'APPROVED' : 'DRAFT',
+      approved: Boolean(raw.approved)
+    };
+  };
+
   const isStoreMonthApproved = (storeId) => {
-    if (!storeId) return false;
-    return Boolean(scheduleApprovals[currentMonthPrefix + '_' + storeId]?.approved);
+    return getStoreApprovalInfo(storeId).status === 'APPROVED';
+  };
+
+  const isStoreMonthPending = (storeId) => {
+    return getStoreApprovalInfo(storeId).status === 'PENDING';
   };
 
   const canEditScheduleForStaff = (staff) => {
     if (isAdmin) return true;
     if (!isManager || staff.storeId !== activeStaffProfile?.storeId) return false;
-    return !isStoreMonthApproved(staff.storeId);
+    const st = getStoreApprovalInfo(staff.storeId).status;
+    return st === 'DRAFT' || st === 'REJECTED';
   };
 
   const handleScheduleChange = (dateStr, staff, shiftCode) => {
@@ -252,9 +270,16 @@ export default function App() {
     } else if (!isManager || staff.storeId !== activeStaffProfile?.storeId) {
       alert('스케줄 입력 및 수정은 본사 관리자와 해당 매장 매니저만 가능합니다.');
       return;
-    } else if (isStoreMonthApproved(staff.storeId)) {
-      alert('이미 관리자 승인이 완료된 스케줄입니다. 변경하려면 관리자 승인이 필요합니다.');
-      return;
+    } else {
+      const st = getStoreApprovalInfo(staff.storeId).status;
+      if (st === 'APPROVED') {
+        alert('관리자 승인이 완료된 스케줄입니다. 변경하려면 관리자에게 승인 해제를 요청하세요.');
+        return;
+      }
+      if (st === 'PENDING') {
+        alert('현재 관리자 승인 심사 중입니다. 수정이 필요하면 관리자에게 반려(수정요청) 또는 승인 해제를 요청하세요.');
+        return;
+      }
     }
 
     const key = dateStr + '_' + staff.id;
@@ -265,14 +290,45 @@ export default function App() {
     saveToCloud({ schedules: updated });
   };
 
-  const handleToggleScheduleApproval = (storeId, nextApproved) => {
-    if (!isAdmin) return;
+  const handleRequestScheduleApproval = (storeId) => {
+    if (!isManager || !storeId) return;
+    if (!window.confirm(year + '년 ' + (month + 1) + '월 스케줄을 관리자에게 승인 요청하시겠습니까?\n요청 후에는 관리자 검토가 끝날 때까지 수정이 잠깁니다.')) return;
     const key = currentMonthPrefix + '_' + storeId;
     const updated = {
       ...scheduleApprovals,
-      [key]: nextApproved
-        ? { approved: true, approvedAt: new Date().toISOString(), approvedBy: adminDisplayName || '관리자' }
-        : { approved: false, updatedAt: new Date().toISOString() }
+      [key]: {
+        status: 'PENDING',
+        approved: false,
+        requestedAt: new Date().toISOString(),
+        requestedBy: activeStaffProfile?.name || '매니저'
+      }
+    };
+    setScheduleApprovals(updated);
+    saveToCloud({ scheduleApprovals: updated });
+    alert('관리자에게 스케줄 승인이 요청되었습니다.');
+  };
+
+  const handleDecideScheduleApproval = (storeId, nextStatus) => {
+    if (!isAdmin || !storeId) return;
+    let rejectReason = '';
+    if (nextStatus === 'REJECTED') {
+      const inputReason = window.prompt('매니저에게 전달할 수정요청(반려) 사유를 입력하세요:', '근무 인원 또는 휴무 배치를 재조정해 주세요.');
+      if (inputReason === null) return;
+      rejectReason = inputReason.trim();
+    }
+
+    const key = currentMonthPrefix + '_' + storeId;
+    const prev = scheduleApprovals[key] || {};
+    const updated = {
+      ...scheduleApprovals,
+      [key]: {
+        ...prev,
+        status: nextStatus,
+        approved: nextStatus === 'APPROVED',
+        rejectReason: nextStatus === 'REJECTED' ? rejectReason : '',
+        decidedAt: new Date().toISOString(),
+        decidedBy: adminDisplayName || '관리자'
+      }
     };
     setScheduleApprovals(updated);
     saveToCloud({ scheduleApprovals: updated });
@@ -737,7 +793,7 @@ export default function App() {
                   </select>
                 </div>
                 <div className="rounded-xl bg-indigo-50 border border-indigo-100 p-3 text-xs text-indigo-800">
-                  본사 관리자 전용 모드입니다. 전 매장 스케줄 승인/편성, USD 매출·수량 마감, 연차 승인 및 계정 관리를 수행합니다.
+                  본사 관리자 전용 모드입니다. 전 매장 스케줄 승인/반려, USD 매출·수량 마감, 연차 승인 및 계정 관리를 수행합니다.
                 </div>
               </div>
             )}
@@ -773,11 +829,16 @@ export default function App() {
   }
 
   const pendingLeavesCount = leaveRequests.filter((r) => r.status === '대기').length;
+  const pendingSchedulesCount = stores.filter((st) => isStoreMonthPending(st.id)).length;
   const currentFilterStoreId = isAdmin ? selectedStoreId : activeStaffProfile?.storeId;
-  const currentStoreApproved =
+  const currentApprovalInfo =
     currentFilterStoreId && currentFilterStoreId !== 'ALL'
-      ? isStoreMonthApproved(currentFilterStoreId)
-      : false;
+      ? getStoreApprovalInfo(currentFilterStoreId)
+      : null;
+  const currentStoreStatus = currentApprovalInfo?.status || 'DRAFT';
+  const currentStoreApproved = currentStoreStatus === 'APPROVED';
+  const currentStorePending = currentStoreStatus === 'PENDING';
+  const currentStoreRejected = currentStoreStatus === 'REJECTED';
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-20">
@@ -818,6 +879,9 @@ export default function App() {
               : 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
           >
             <CalendarIcon className="w-4 h-4" />근무 스케줄
+            {isAdmin && pendingSchedulesCount > 0 && (
+              <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded-full bg-amber-500 text-slate-950 font-bold">{pendingSchedulesCount}</span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('sales')}
@@ -886,32 +950,90 @@ export default function App() {
                   {currentFilterStoreId && currentFilterStoreId !== 'ALL' && (
                     <span className={currentStoreApproved
                       ? 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-800 inline-flex items-center gap-1'
-                      : 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-amber-100 text-amber-800 inline-flex items-center gap-1'}>
+                      : currentStorePending
+                      ? 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-amber-100 text-amber-800 inline-flex items-center gap-1'
+                      : currentStoreRejected
+                      ? 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-rose-100 text-rose-800 inline-flex items-center gap-1'
+                      : 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-slate-100 text-slate-700 inline-flex items-center gap-1'}>
                       {currentStoreApproved ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-                      {currentStoreApproved ? '관리자 승인 확정 (수정 잠금)' : '작성/수정 가능'}
+                      {currentStoreApproved
+                        ? '관리자 승인 완료 (수정 잠금)'
+                        : currentStorePending
+                        ? '관리자 승인 대기 중 (' + (currentApprovalInfo?.requestedBy || '매니저') + ' 요청)'
+                        : currentStoreRejected
+                        ? '수정요청(반려)됨 — 재수정 가능'
+                        : '작성 중 (승인 요청 전)'}
                     </span>
                   )}
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
                   {isAdmin
-                    ? '관리자는 전 매장 스케줄을 입력·수정할 수 있으며, 승인 확정 시 매니저 임의 변경이 잠깁니다.'
+                    ? '매니저가 승인 요청한 스케줄을 검토해 승인 완료하거나 수정요청(반려)할 수 있으며, 직접 수정도 가능합니다.'
                     : isManager
-                    ? '매니저는 소속 매장 스케줄을 입력할 수 있으며, 관리자 승인 확정 후 변경 시 관리자 승인이 필요합니다.'
+                    ? '스케줄 입력 후 [관리자 승인 요청]을 눌러 제출하세요. 승인 요청 중 또는 승인 완료 후에는 관리자 조치가 필요합니다.'
                     : '스케줄 입력/수정은 관리자와 매니저만 가능하며, 일반 직원은 조회만 가능합니다.'}
                 </p>
+                {currentStoreRejected && currentApprovalInfo?.rejectReason && (
+                  <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2.5 py-1 mt-1.5 inline-block">
+                    반려 사유: {currentApprovalInfo.rejectReason}
+                  </p>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                {isAdmin && currentFilterStoreId && currentFilterStoreId !== 'ALL' && (
+                {isManager && currentFilterStoreId && (
                   <button
-                    onClick={() => handleToggleScheduleApproval(currentFilterStoreId, !currentStoreApproved)}
-                    className={currentStoreApproved
-                      ? 'px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 inline-flex items-center gap-1'
-                      : 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 inline-flex items-center gap-1'}
+                    type="button"
+                    disabled={currentStorePending || currentStoreApproved}
+                    onClick={() => handleRequestScheduleApproval(currentFilterStoreId)}
+                    className={currentStorePending || currentStoreApproved
+                      ? 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed inline-flex items-center gap-1'
+                      : 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white inline-flex items-center gap-1'}
                   >
-                    {currentStoreApproved ? <Unlock className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-                    {currentStoreApproved ? '승인 해제 (변경 허용)' : '스케줄 관리자 승인'}
+                    <Send className="w-3.5 h-3.5" />
+                    {currentStoreApproved
+                      ? '승인 확정됨'
+                      : currentStorePending
+                      ? '승인 요청됨'
+                      : currentStoreRejected
+                      ? '재승인 요청'
+                      : '관리자 승인 요청'}
                   </button>
+                )}
+
+                {isAdmin && currentFilterStoreId && currentFilterStoreId !== 'ALL' && (
+                  <>
+                    {!currentStoreApproved && (
+                      <button
+                        type="button"
+                        onClick={() => handleDecideScheduleApproval(currentFilterStoreId, 'APPROVED')}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        승인 완료
+                      </button>
+                    )}
+                    {currentStorePending && (
+                      <button
+                        type="button"
+                        onClick={() => handleDecideScheduleApproval(currentFilterStoreId, 'REJECTED')}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100 inline-flex items-center gap-1"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        수정요청(반려)
+                      </button>
+                    )}
+                    {currentStoreApproved && (
+                      <button
+                        type="button"
+                        onClick={() => handleDecideScheduleApproval(currentFilterStoreId, 'DRAFT')}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 inline-flex items-center gap-1"
+                      >
+                        <Unlock className="w-3.5 h-3.5" />
+                        승인 해제
+                      </button>
+                    )}
+                  </>
                 )}
 
                 <button
@@ -958,7 +1080,7 @@ export default function App() {
                   {visibleStaff.map((staff) => {
                     const stObj = stores.find((s) => s.id === staff.storeId);
                     const rowEditable = canEditScheduleForStaff(staff);
-                    const rowApproved = isStoreMonthApproved(staff.storeId);
+                    const rowApproval = getStoreApprovalInfo(staff.storeId);
                     return (
                       <tr key={staff.id} className="border-b border-slate-100 hover:bg-slate-50/70">
                         <td className="sticky left-0 z-10 bg-white px-3 py-2 border-r border-slate-200">
@@ -990,7 +1112,7 @@ export default function App() {
                                 </select>
                               ) : (
                                 <span
-                                  title={rowApproved && isManager ? '관리자 승인 완료 상태입니다.' : ''}
+                                  title={rowApproval.status === 'APPROVED' ? '관리자 승인 완료 상태입니다.' : rowApproval.status === 'PENDING' ? '관리자 승인 대기 중입니다.' : ''}
                                   className={shiftMeta
                                     ? 'inline-block w-full py-1 rounded text-[11px] font-semibold border ' + shiftMeta.color
                                     : 'inline-block w-full py-1 rounded text-[11px] font-semibold text-slate-300'}
@@ -1471,22 +1593,55 @@ export default function App() {
                 <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
                   <h2 className="font-bold text-base mb-3 flex items-center gap-1.5">
                     <ShieldAlert className="w-4 h-4 text-indigo-600" />
-                    {year}년 {month + 1}월 매장별 스케줄 승인 상태 관리 (승인 시 매니저 임의 변경 잠금)
+                    {year}년 {month + 1}월 매장별 스케줄 승인·반려 관리
                   </h2>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
                     {stores.map((st) => {
-                      const approved = isStoreMonthApproved(st.id);
+                      const info = getStoreApprovalInfo(st.id);
+                      const status = info.status;
                       return (
-                        <div key={st.id} className="flex items-center justify-between border border-slate-200 rounded-lg p-3">
-                          <span className="text-xs font-bold text-slate-800 truncate pr-2">{st.name}</span>
-                          <button
-                            onClick={() => handleToggleScheduleApproval(st.id, !approved)}
-                            className={approved
-                              ? 'px-2.5 py-1 rounded text-[11px] font-bold bg-emerald-100 text-emerald-800 hover:bg-emerald-200 shrink-0'
-                              : 'px-2.5 py-1 rounded text-[11px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200 shrink-0'}
-                          >
-                            {approved ? '승인완료 (해제)' : '승인하기'}
-                          </button>
+                        <div key={st.id} className="border border-slate-200 rounded-lg p-3 space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-bold text-slate-800 truncate">{st.name}</span>
+                            <span className={status === 'APPROVED'
+                              ? 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 shrink-0'
+                              : status === 'PENDING'
+                              ? 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 shrink-0'
+                              : status === 'REJECTED'
+                              ? 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 shrink-0'
+                              : 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 shrink-0'}>
+                              {status === 'APPROVED' ? '승인완료' : status === 'PENDING' ? '승인대기' : status === 'REJECTED' ? '반려됨' : '작성중'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 justify-end">
+                            {status !== 'APPROVED' && (
+                              <button
+                                type="button"
+                                onClick={() => handleDecideScheduleApproval(st.id, 'APPROVED')}
+                                className="px-2.5 py-1 rounded text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700"
+                              >
+                                승인
+                              </button>
+                            )}
+                            {status === 'PENDING' && (
+                              <button
+                                type="button"
+                                onClick={() => handleDecideScheduleApproval(st.id, 'REJECTED')}
+                                className="px-2.5 py-1 rounded text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100"
+                              >
+                                반려
+                              </button>
+                            )}
+                            {status === 'APPROVED' && (
+                              <button
+                                type="button"
+                                onClick={() => handleDecideScheduleApproval(st.id, 'DRAFT')}
+                                className="px-2.5 py-1 rounded text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100"
+                              >
+                                해제
+                              </button>
+                            )}
+                          </div>
                         </div>
                       );
                     })}
