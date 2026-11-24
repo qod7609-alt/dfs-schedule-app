@@ -25,13 +25,13 @@ const db = getFirestore(app);
 const APP_DOC_REF = doc(db, 'retail_management', 'dfs_schedule_v1');
 
 const DEFAULT_STORES = [
-  { id: 'store_1', name: '롯데면세점 명동본점', targetSales: 150000000 },
-  { id: 'store_2', name: '롯데면세점 월드타워점', targetSales: 95000000 },
-  { id: 'store_3', name: '신라면세점 서울점', targetSales: 110000000 },
-  { id: 'store_4', name: '신세계면세점 명동점', targetSales: 120000000 },
-  { id: 'store_5', name: '현대백화점면세점 무역센터점', targetSales: 80000000 },
-  { id: 'store_6', name: '인천공항 T1 면세점', targetSales: 130000000 },
-  { id: 'store_7', name: '인천공항 T2 면세점', targetSales: 125000000 }
+  { id: 'store_1', name: '롯데면세점 명동본점', targetSales: 120000 },
+  { id: 'store_2', name: '롯데면세점 월드타워점', targetSales: 80000 },
+  { id: 'store_3', name: '신라면세점 서울점', targetSales: 90000 },
+  { id: 'store_4', name: '신세계면세점 명동점', targetSales: 95000 },
+  { id: 'store_5', name: '현대백화점면세점 무역센터점', targetSales: 65000 },
+  { id: 'store_6', name: '인천공항 T1 면세점', targetSales: 110000 },
+  { id: 'store_7', name: '인천공항 T2 면세점', targetSales: 105000 }
 ];
 
 const DEFAULT_STAFF = [
@@ -58,6 +58,16 @@ const getLeaveCost = (type) => {
   if (type === '연차') return 1;
   if (type === '반차') return 0.5;
   return 0;
+};
+
+const formatUsd = (val) => {
+  const num = Math.round(Number(val) || 0);
+  return '$' + num.toLocaleString();
+};
+
+const formatQty = (val) => {
+  const num = Number(val) || 0;
+  return Number.isInteger(num) ? num.toLocaleString() : num.toFixed(1);
 };
 
 export default function App() {
@@ -298,6 +308,7 @@ export default function App() {
   const [salesDate, setSalesDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [salesStoreInput, setSalesStoreInput] = useState('');
   const [salesAmountInput, setSalesAmountInput] = useState('');
+  const [salesQuantityInput, setSalesQuantityInput] = useState('');
   const [salesNoteInput, setSalesNoteInput] = useState('');
 
   useEffect(() => {
@@ -313,12 +324,14 @@ export default function App() {
     const targetStoreId = isAdmin ? salesStoreInput : activeStaffProfile?.storeId;
     if (!targetStoreId || !salesDate) return;
 
-    const numericAmount = Number(String(salesAmountInput).replace(/,/g, '')) || 0;
+    const numericAmount = Math.max(0, Math.round(Number(String(salesAmountInput).replace(/,/g, '')) || 0));
+    const numericQuantity = Math.max(0, Math.round(Number(String(salesQuantityInput).replace(/,/g, '')) || 0));
     const key = salesDate + '_' + targetStoreId;
     const updatedRecords = {
       ...salesRecords,
       [key]: {
         amount: numericAmount,
+        quantity: numericQuantity,
         note: salesNoteInput.trim(),
         author: isAdmin ? adminDisplayName : activeStaffProfile?.name || '직원',
         updatedAt: new Date().toISOString()
@@ -333,8 +346,9 @@ export default function App() {
     setSalesRecords(updatedRecords);
     saveToCloud({ salesRecords: updatedRecords });
     setSalesAmountInput('');
+    setSalesQuantityInput('');
     setSalesNoteInput('');
-    alert('일매출이 등록되었고 대시보드에 실시간 합산되었습니다.');
+    alert('일매출(USD) 및 판매 수량이 등록되었고 대시보드에 실시간 합산되었습니다.');
   };
 
   const [leaveDate, setLeaveDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -552,14 +566,15 @@ export default function App() {
   const monthlySalesSummary = useMemo(() => {
     const byStore = {};
     stores.forEach((st) => {
-      byStore[st.id] = 0;
+      byStore[st.id] = { amount: 0, quantity: 0 };
     });
     Object.entries(salesRecords).forEach(([key, val]) => {
       if (key.startsWith(currentMonthPrefix)) {
         const parts = key.split('_');
         const stId = parts.slice(1).join('_');
         if (byStore[stId] !== undefined) {
-          byStore[stId] += Number(val.amount) || 0;
+          byStore[stId].amount += Number(val.amount) || 0;
+          byStore[stId].quantity += Number(val.quantity) || 0;
         }
       }
     });
@@ -572,12 +587,13 @@ export default function App() {
       statsByStaff[stf.id] = {
         staff: stf,
         totalAllocated: 0,
+        totalAllocatedQty: 0,
         workDaysCount: 0,
         groupStats: {
-          'A조': { sum: 0, count: 0 },
-          'B조': { sum: 0, count: 0 },
-          'C조': { sum: 0, count: 0 },
-          'F조': { sum: 0, count: 0 }
+          'A조': { sum: 0, qtySum: 0, count: 0 },
+          'B조': { sum: 0, qtySum: 0, count: 0 },
+          'C조': { sum: 0, qtySum: 0, count: 0 },
+          'F조': { sum: 0, qtySum: 0, count: 0 }
         }
       };
     });
@@ -588,7 +604,8 @@ export default function App() {
       const dateStr = parts[0];
       const storeId = parts.slice(1).join('_');
       const daySales = Number(rec.amount) || 0;
-      if (daySales <= 0) return;
+      const dayQty = Number(rec.quantity) || 0;
+      if (daySales <= 0 && dayQty <= 0) return;
 
       const workingOnDay = staffList.filter((stf) => {
         if (stf.storeId !== storeId) return false;
@@ -598,15 +615,18 @@ export default function App() {
 
       if (workingOnDay.length === 0) return;
       const perPersonShare = daySales / workingOnDay.length;
+      const perPersonQtyShare = dayQty / workingOnDay.length;
 
       workingOnDay.forEach((stf) => {
         const shift = schedules[dateStr + '_' + stf.id];
         const entry = statsByStaff[stf.id];
         if (!entry) return;
         entry.totalAllocated += perPersonShare;
+        entry.totalAllocatedQty += perPersonQtyShare;
         entry.workDaysCount += 1;
         if (entry.groupStats[shift]) {
           entry.groupStats[shift].sum += perPersonShare;
+          entry.groupStats[shift].qtySum += perPersonQtyShare;
           entry.groupStats[shift].count += 1;
         }
       });
@@ -621,6 +641,7 @@ export default function App() {
       })
       .map((item) => {
         const overallAvg = item.workDaysCount > 0 ? Math.round(item.totalAllocated / item.workDaysCount) : 0;
+        const overallAvgQty = item.workDaysCount > 0 ? Number((item.totalAllocatedQty / item.workDaysCount).toFixed(1)) : 0;
         const groupAverages = {};
         WORK_GROUPS.forEach((g) => {
           const gs = item.groupStats[g];
@@ -629,7 +650,9 @@ export default function App() {
         return {
           ...item,
           totalAllocatedRounded: Math.round(item.totalAllocated),
+          totalAllocatedQtyRounded: Number(item.totalAllocatedQty.toFixed(1)),
           overallAvg,
+          overallAvgQty,
           groupAverages
         };
       });
@@ -716,7 +739,7 @@ export default function App() {
                   </select>
                 </div>
                 <div className="rounded-xl bg-indigo-50 border border-indigo-100 p-3 text-xs text-indigo-800">
-                  본사 관리자 전용 모드입니다. 전 매장 스케줄 승인/편성, 매출 마감, 연차 승인 및 계정 관리를 수행합니다.
+                  본사 관리자 전용 모드입니다. 전 매장 스케줄 승인/편성, USD 매출·수량 마감, 연차 승인 및 계정 관리를 수행합니다.
                 </div>
               </div>
             )}
@@ -804,7 +827,7 @@ export default function App() {
               ? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
               : 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
           >
-            <TrendingUp className="w-4 h-4" />일매출 · 사원집계
+            <TrendingUp className="w-4 h-4" />일매출(USD) · 수량집계
           </button>
           <button
             onClick={() => setActiveTab('leave')}
@@ -994,10 +1017,10 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm h-fit">
                 <h2 className="font-bold text-base mb-1 flex items-center gap-1.5">
-                  <FileSpreadsheet className="w-4 h-4 text-indigo-600" />일매출 마감 등록
+                  <FileSpreadsheet className="w-4 h-4 text-indigo-600" />일매출(USD) · 수량 마감 등록
                 </h2>
                 <p className="text-xs text-slate-500 mb-4">
-                  등록 즉시 매장 목표 대시보드와 출근 사원별 배분·조별 평균 매출에 합산됩니다.
+                  1 USD 단위 금액과 판매 수량(PCS)을 등록하면 매장 목표와 사원별 배분 집계에 실시간 반영됩니다.
                 </p>
                 <form onSubmit={handleSaveSales} className="space-y-3.5">
                   <div>
@@ -1029,18 +1052,33 @@ export default function App() {
                       />
                     )}
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">일매출 금액 (원)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1000"
-                      value={salesAmountInput}
-                      onChange={(e) => setSalesAmountInput(e.target.value)}
-                      placeholder="예: 4500000"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold"
-                      required
-                    />
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">일매출 금액 (USD)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={salesAmountInput}
+                        onChange={(e) => setSalesAmountInput(e.target.value)}
+                        placeholder="예: 3450"
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">판매 수량 (PCS)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={salesQuantityInput}
+                        onChange={(e) => setSalesQuantityInput(e.target.value)}
+                        placeholder="예: 24"
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold"
+                        required
+                      />
+                    </div>
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-600 mb-1">특이사항 / 비고</label>
@@ -1053,32 +1091,39 @@ export default function App() {
                     />
                   </div>
                   <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">
-                    일매출 저장 및 실시간 합산
+                    일매출(USD) · 수량 저장
                   </button>
                 </form>
               </div>
 
               <div className="lg:col-span-2 space-y-6">
                 <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                  <h3 className="font-bold text-base mb-4">{year}년 {month + 1}월 매장별 목표 대비 달성 현황</h3>
+                  <h3 className="font-bold text-base mb-4">{year}년 {month + 1}월 매장별 목표 대비 달성 현황 (USD)</h3>
                   <div className="space-y-4">
                     {stores
                       .filter((st) => isAdmin || st.id === activeStaffProfile?.storeId)
                       .map((st) => {
-                        const actual = monthlySalesSummary[st.id] || 0;
+                        const summary = monthlySalesSummary[st.id] || { amount: 0, quantity: 0 };
+                        const actual = summary.amount;
+                        const totalQty = summary.quantity;
                         const rate = st.targetSales > 0 ? Math.round((actual / st.targetSales) * 100) : 0;
                         return (
                           <div key={st.id} className="border border-slate-100 rounded-lg p-3 bg-slate-50/60">
                             <div className="flex justify-between items-center text-sm mb-1.5">
                               <span className="font-bold text-slate-800">{st.name}</span>
-                              <span className="font-bold text-indigo-600">{rate}% 달성</span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-semibold px-2 py-0.5 rounded bg-slate-200/80 text-slate-700">
+                                  누적 {totalQty.toLocaleString()} PCS
+                                </span>
+                                <span className="font-bold text-indigo-600">{rate}% 달성</span>
+                              </div>
                             </div>
                             <div className="w-full h-2.5 bg-slate-200 rounded-full overflow-hidden mb-1.5">
                               <div className="h-full bg-indigo-600 rounded-full transition-all" style={{ width: Math.min(rate, 100) + '%' }} />
                             </div>
                             <div className="flex justify-between text-xs text-slate-500">
-                              <span>누적 매출: {actual.toLocaleString()}원</span>
-                              <span>월 목표: {st.targetSales.toLocaleString()}원</span>
+                              <span>누적 매출: <strong className="text-slate-700">{formatUsd(actual)}</strong></span>
+                              <span>월 목표: {formatUsd(st.targetSales)}</span>
                             </div>
                           </div>
                         );
@@ -1087,14 +1132,15 @@ export default function App() {
                 </div>
 
                 <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                  <h3 className="font-bold text-base mb-3">당월 일매출 입력 내역</h3>
+                  <h3 className="font-bold text-base mb-3">당월 일매출 · 판매수량 입력 내역</h3>
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs text-left">
                       <thead>
                         <tr className="border-b border-slate-200 text-slate-500">
                           <th className="py-2">일자</th>
                           <th className="py-2">매장명</th>
-                          <th className="py-2 text-right">매출액</th>
+                          <th className="py-2 text-right">매출액(USD)</th>
+                          <th className="py-2 text-right">수량(PCS)</th>
                           <th className="py-2 pl-3">비고 / 작성자</th>
                         </tr>
                       </thead>
@@ -1102,12 +1148,13 @@ export default function App() {
                         {Object.entries(salesRecords)
                           .filter(([key]) => {
                             if (!key.startsWith(currentMonthPrefix)) return false;
-                            const [, stId] = key.split('_');
+                            const parts = key.split('_');
+                            const stId = parts.slice(1).join('_');
                             return isAdmin || stId === activeStaffProfile?.storeId;
                           })
                           .sort((a, b) => b[0].localeCompare(a[0]))
                           .map(([key, rec]) => {
-                           const parts = key.split('_');
+                            const parts = key.split('_');
                             const dt = parts[0];
                             const stId = parts.slice(1).join('_');
                             const stName = stores.find((s) => s.id === stId)?.name || stId;
@@ -1115,7 +1162,8 @@ export default function App() {
                               <tr key={key} className="border-b border-slate-100">
                                 <td className="py-2.5 font-medium">{dt}</td>
                                 <td className="py-2.5">{stName}</td>
-                                <td className="py-2.5 text-right font-bold text-slate-800">{Number(rec.amount).toLocaleString()}원</td>
+                                <td className="py-2.5 text-right font-bold text-slate-800">{formatUsd(rec.amount)}</td>
+                                <td className="py-2.5 text-right font-semibold text-indigo-700">{Number(rec.quantity || 0).toLocaleString()} PCS</td>
                                 <td className="py-2.5 pl-3 text-slate-500">{rec.note || '-'} ({rec.author})</td>
                               </tr>
                             );
@@ -1130,10 +1178,10 @@ export default function App() {
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
               <div className="mb-3">
                 <h3 className="font-bold text-base">
-                  {year}년 {month + 1}월 판매사원별 출근 배분 매출 및 조별(A/B/C/F) 평균 매출
+                  {year}년 {month + 1}월 판매사원별 출근 배분 매출(USD) · 수량 및 조별(A/B/C/F) 평균
                 </h3>
                 <p className="text-xs text-slate-500">
-                  해당 일자 매장에 A·B·C·F조로 출근한 인원에게 당일 매출을 균등 배분한 뒤, 사원별 총 배분액과 각 조 출근 시 평균 매출을 집계합니다.
+                  해당 일자 매장에 A·B·C·F조로 출근한 인원에게 당일 매출(USD)과 판매 수량(PCS)을 균등 배분해 사원별 누적·평균 및 조별 평균 매출을 집계합니다.
                 </p>
               </div>
               <div className="overflow-x-auto">
@@ -1144,7 +1192,9 @@ export default function App() {
                       <th className="py-2.5 px-3">소속 매장</th>
                       <th className="py-2.5 px-3 text-center">출근일수</th>
                       <th className="py-2.5 px-3 text-right">총 배분매출</th>
-                      <th className="py-2.5 px-3 text-right">출근일 평균</th>
+                      <th className="py-2.5 px-3 text-right">총 배분수량</th>
+                      <th className="py-2.5 px-3 text-right">출근일 평균매출</th>
+                      <th className="py-2.5 px-3 text-right">일 평균수량</th>
                       <th className="py-2.5 px-3 text-right">A조 평균</th>
                       <th className="py-2.5 px-3 text-right">B조 평균</th>
                       <th className="py-2.5 px-3 text-right">C조 평균</th>
@@ -1162,14 +1212,20 @@ export default function App() {
                           <td className="py-2.5 px-3 text-slate-600">{stName}</td>
                           <td className="py-2.5 px-3 text-center font-semibold">{row.workDaysCount}일</td>
                           <td className="py-2.5 px-3 text-right font-bold text-indigo-700">
-                            {row.totalAllocatedRounded.toLocaleString()}원
+                            {formatUsd(row.totalAllocatedRounded)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-semibold text-slate-700">
+                            {formatQty(row.totalAllocatedQtyRounded)} PCS
                           </td>
                           <td className="py-2.5 px-3 text-right font-semibold text-slate-800">
-                            {row.overallAvg.toLocaleString()}원
+                            {formatUsd(row.overallAvg)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600">
+                            {formatQty(row.overallAvgQty)} PCS
                           </td>
                           {WORK_GROUPS.map((g) => (
                             <td key={g} className="py-2.5 px-3 text-right font-mono text-slate-700">
-                              {row.groupAverages[g] !== null ? row.groupAverages[g].toLocaleString() + '원' : '-'}
+                              {row.groupAverages[g] !== null ? formatUsd(row.groupAverages[g]) : '-'}
                             </td>
                           ))}
                         </tr>
@@ -1440,13 +1496,16 @@ export default function App() {
                 </div>
 
                 <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                  <h2 className="font-bold text-base mb-3">지점명 및 월 목표 매출 설정 (7개점)</h2>
+                  <h2 className="font-bold text-base mb-3">지점명 및 월 목표 매출 설정 (USD)</h2>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {stores.map((st, idx) => (
                       <div key={st.id} className="flex items-center gap-2 border border-slate-200 rounded-lg p-2.5">
                         <span className="text-xs font-bold text-slate-400 w-5">{idx + 1}.</span>
                         <input type="text" value={st.name} onChange={(e) => handleUpdateStore(st.id, 'name', e.target.value)} className="flex-1 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-semibold" />
-                        <input type="number" step="1000000" value={st.targetSales} onChange={(e) => handleUpdateStore(st.id, 'targetSales', e.target.value)} className="w-32 border border-slate-300 rounded px-2.5 py-1.5 text-xs text-right font-mono" />
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs font-bold text-slate-500">$</span>
+                          <input type="number" step="100" value={st.targetSales} onChange={(e) => handleUpdateStore(st.id, 'targetSales', e.target.value)} className="w-28 border border-slate-300 rounded px-2.5 py-1.5 text-xs text-right font-mono" />
+                        </div>
                       </div>
                     ))}
                   </div>
