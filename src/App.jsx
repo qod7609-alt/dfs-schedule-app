@@ -3,7 +3,8 @@ import {
   Calendar as CalendarIcon, Users, Store, TrendingUp, Clock, Lock, Unlock,
   LogOut, Plus, Trash2, CheckCircle2, XCircle, Edit3, KeyRound, ChevronLeft,
   ChevronRight, AlertCircle, ShieldCheck, UserCheck, FileSpreadsheet,
-  Download, ShieldAlert, Send, RotateCcw, BarChart3, UserX
+  Download, ShieldAlert, Send, RotateCcw, BarChart3, UserX, ArrowUpDown,
+  ArrowUp, ArrowDown
 } from 'lucide-react';
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
@@ -43,7 +44,7 @@ const DEFAULT_STAFF = [
 ];
 
 const WORK_GROUPS = ['A조', 'B조', 'C조', 'F조'];
-const ROLE_OPTIONS = ['매니저', '시니어', '사원', '아르바이트'];
+const ROLE_OPTIONS = ['TF팀장', '슈퍼바이저', '매니저', '시니어', '사원', '아르바이트'];
 
 const SHIFT_TYPES = [
   { code: 'A조', label: 'A조 근무', color: 'bg-sky-100 text-sky-800 border-sky-200', isWork: true },
@@ -76,11 +77,6 @@ const formatDays = (val) => {
   return Number.isInteger(num) ? String(num) : num.toFixed(1);
 };
 
-/**
- * 입사년월일 기준 연차/월차 자동 산출:
- * - 입사 1년 미만: 입사일 이후 경과된 만근 개월 수만큼 월차(1개월당 1일, 최대 11일) 자동 산출
- * - 입사 1년 이상: 근속연수 기준 연차(1년차 15일, 이후 2년마다 1일 가산 최대 25일)
- */
 const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date()) => {
   if (!hireDateStr) return null;
   const parts = String(hireDateStr).split('-').map(Number);
@@ -141,6 +137,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('schedule');
   const [selectedStoreId, setSelectedStoreId] = useState('ALL');
   const [currentDate, setCurrentDate] = useState(() => new Date());
+
+  // 사원별 배분집계표 정렬 상태
+  const [sortField, setSortField] = useState('totalAllocatedRounded');
+  const [sortDirection, setSortDirection] = useState('desc');
 
   useEffect(() => {
     let unsubscribeSnapshot = null;
@@ -234,7 +234,6 @@ export default function App() {
     [staffList]
   );
 
-  // 직원별 연초 부여연차 / 사용연차 / 남은연차 계산
   const leaveSummaryByStaff = useMemo(() => {
     const map = {};
     staffList.forEach((stf) => {
@@ -246,12 +245,10 @@ export default function App() {
           ? calc.earned
           : Number(stf.annualLeave ?? 0);
 
-      // 승인된 휴가 신청의 연차/반차 합산
       const approvedReqUsed = leaveRequests
         .filter((r) => r.staffId === stf.id && r.status === '승인')
         .reduce((acc, r) => acc + (r.cost !== undefined ? Number(r.cost) : getLeaveCost(r.type)), 0);
 
-      // 스케줄표에 직접 입력된 연차/반차 중 승인요청과 중복되지 않는 건 보완
       const approvedDates = new Set(
         leaveRequests.filter((r) => r.staffId === stf.id && r.status === '승인').map((r) => r.date)
       );
@@ -451,6 +448,21 @@ export default function App() {
     saveToCloud({ scheduleApprovals: updated });
   };
 
+  const escapeCsv = (val) => '"' + String(val ?? '').replace(/"/g, '""') + '"';
+
+  const triggerCsvDownload = (filename, headers, rows) => {
+    const csvContent = '\uFEFF' + [headers, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const handleDownloadScheduleExcel = () => {
     const targetStaff = visibleStaff;
     const headers = ['매장명', '성명', '직책', '잔여연차', ...daysInMonth.map((d) => d.day + '일(' + d.dayName + ')')];
@@ -461,22 +473,13 @@ export default function App() {
       return [stName, stf.name, stf.role, rem, ...dayCells];
     });
 
-    const escapeCsv = (val) => '"' + String(val ?? '').replace(/"/g, '""') + '"';
-    const csvContent = '\uFEFF' + [headers, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\r\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
     const filterLabel = isAdmin
       ? selectedStoreId === 'ALL'
         ? '전체매장'
         : stores.find((s) => s.id === selectedStoreId)?.name || '매장'
       : myStoreObj?.name || '매장';
-    link.href = url;
-    link.download = '근무스케줄_' + currentMonthPrefix + '_' + filterLabel + '.csv';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+
+    triggerCsvDownload('근무스케줄_' + currentMonthPrefix + '_' + filterLabel + '.csv', headers, rows);
   };
 
   const [salesDate, setSalesDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -915,8 +918,7 @@ export default function App() {
 
     return Object.values(statsByStaff)
       .filter((item) => {
-        // 기존 매출 데이터가 있는 퇴사자도 기록 보존을 위해 포함하되, 실적 0인 퇴사자는 제외
-        const hasAnyActivity = item.workDaysCount > 0 || item.totalAllocatedRounded > 0;
+        const hasAnyActivity = item.workDaysCount > 0 || item.totalAllocated > 0;
         if (item.staff.status === 'RESIGNED' && !hasAnyActivity) return false;
         if (isAdmin) {
           return selectedStoreId === 'ALL' || item.staff.storeId === selectedStoreId;
@@ -924,6 +926,7 @@ export default function App() {
         return item.staff.storeId === activeStaffProfile?.storeId;
       })
       .map((item) => {
+        const storeName = stores.find((s) => s.id === item.staff.storeId)?.name || '미지정';
         const overallAvg = item.workDaysCount > 0 ? Math.round(item.totalAllocated / item.workDaysCount) : 0;
         const overallAvgQty = item.workDaysCount > 0 ? Number((item.totalAllocatedQty / item.workDaysCount).toFixed(1)) : 0;
         const groupAverages = {};
@@ -933,6 +936,8 @@ export default function App() {
         });
         return {
           ...item,
+          storeName,
+          staffName: item.staff.name,
           totalAllocatedRounded: Math.round(item.totalAllocated),
           totalAllocatedQtyRounded: Number(item.totalAllocatedQty.toFixed(1)),
           overallAvg,
@@ -940,7 +945,97 @@ export default function App() {
           groupAverages
         };
       });
-  }, [salesRecords, schedules, staffList, currentMonthPrefix, isAdmin, selectedStoreId, activeStaffProfile]);
+  }, [salesRecords, schedules, staffList, stores, currentMonthPrefix, isAdmin, selectedStoreId, activeStaffProfile]);
+
+  const getSortValue = (row, field) => {
+    if (field === 'staffName') return row.staffName || '';
+    if (field === 'storeName') return row.storeName || '';
+    if (field.startsWith('group_')) {
+      const grp = field.replace('group_', '');
+      const val = row.groupAverages?.[grp];
+      return val === null || val === undefined ? -1 : Number(val);
+    }
+    return Number(row[field] ?? 0);
+  };
+
+  const sortedStaffSalesAnalytics = useMemo(() => {
+    const arr = [...staffSalesAnalytics];
+    arr.sort((a, b) => {
+      const va = getSortValue(a, sortField);
+      const vb = getSortValue(b, sortField);
+      if (typeof va === 'string' && typeof vb === 'string') {
+        const cmp = va.localeCompare(vb, 'ko');
+        return sortDirection === 'asc' ? cmp : -cmp;
+      }
+      return sortDirection === 'asc' ? Number(va) - Number(vb) : Number(vb) - Number(va);
+    });
+    return arr;
+  }, [staffSalesAnalytics, sortField, sortDirection]);
+
+  const handleHeaderSort = (field) => {
+    if (sortField === field) {
+      setSortDirection((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortField(field);
+      setSortDirection(field === 'staffName' || field === 'storeName' ? 'asc' : 'desc');
+    }
+  };
+
+  const renderSortIcon = (field) => {
+    if (sortField !== field) {
+      return <ArrowUpDown className="w-3 h-3 text-slate-400 inline ml-1" />;
+    }
+    return sortDirection === 'asc' ? (
+      <ArrowUp className="w-3 h-3 text-indigo-600 inline ml-1" />
+    ) : (
+      <ArrowDown className="w-3 h-3 text-indigo-600 inline ml-1" />
+    );
+  };
+
+  const handleDownloadStaffSalesExcel = () => {
+    const headers = [
+      '사원명',
+      '직책',
+      '상태',
+      '소속 매장',
+      '출근일수',
+      '총 배분매출(USD)',
+      '총 배분수량(PCS)',
+      '출근일 평균매출(USD)',
+      '일 평균수량(PCS)',
+      'A조 평균(USD)',
+      'B조 평균(USD)',
+      'C조 평균(USD)',
+      'F조 평균(USD)'
+    ];
+    const rows = sortedStaffSalesAnalytics.map((row) => [
+      row.staff.name,
+      row.staff.role,
+      row.staff.status === 'RESIGNED' ? '퇴사' : '재직',
+      row.storeName,
+      row.workDaysCount,
+      row.totalAllocatedRounded,
+      row.totalAllocatedQtyRounded,
+      row.overallAvg,
+      row.overallAvgQty,
+      row.groupAverages['A조'] !== null ? row.groupAverages['A조'] : '',
+      row.groupAverages['B조'] !== null ? row.groupAverages['B조'] : '',
+      row.groupAverages['C조'] !== null ? row.groupAverages['C조'] : '',
+      row.groupAverages['F조'] !== null ? row.groupAverages['F조'] : ''
+    ]);
+
+    const filterLabel = isAdmin
+      ? selectedStoreId === 'ALL'
+        ? '전체매장'
+        : stores.find((s) => s.id === selectedStoreId)?.name || '매장'
+      : myStoreObj?.name || '매장';
+
+    triggerCsvDownload(
+      '사원별_배분집계_' + currentMonthPrefix + '_' + filterLabel + '.csv',
+      headers,
+      rows
+    );
+  };
 
   const visibleStaff = useMemo(() => {
     if (currentUser?.role === 'staff' && activeStaffProfile) {
@@ -950,7 +1045,6 @@ export default function App() {
     return activeStaffList.filter((s) => s.storeId === selectedStoreId);
   }, [currentUser, activeStaffProfile, selectedStoreId, staffList, activeStaffList]);
 
-  // 스케줄표 하단 일자별 조별 근무 인원 집계
   const dailyGroupCounts = useMemo(() => {
     const result = {};
     daysInMonth.forEach((d) => {
@@ -967,7 +1061,6 @@ export default function App() {
     return result;
   }, [daysInMonth, visibleStaff, schedules]);
 
-  // 휴가·연차관리 탭용 매장/인원별 연차 요약 목록
   const leaveOverviewRows = useMemo(() => {
     return staffList
       .filter((stf) => {
@@ -1409,7 +1502,6 @@ export default function App() {
                     );
                   })}
 
-                  {/* 제일 하단: 일자별 조별 근무 인원 요약 */}
                   <tr className="bg-indigo-50/70 border-t-2 border-indigo-200 font-semibold">
                     <td className="sticky left-0 z-10 bg-indigo-50 px-3 py-2 border-r border-indigo-200 text-indigo-950">
                       <div className="font-bold text-xs">일별 조별 출근인원</div>
@@ -1611,64 +1703,144 @@ export default function App() {
 
         {activeTab === 'staff_sales' && (
           <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-            <div className="mb-4">
-              <h2 className="font-bold text-base">
-                {year}년 {month + 1}월 판매사원별 출근 배분 매출(USD) · 수량 및 조별(A/B/C/F) 평균
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                해당 일자 매장에 A·B·C·F조로 출근한 모든 사원에게 당일 매장 전체 매출(USD)과 판매 수량(PCS)을 동일하게 부여하여 사원별 누적·평균 및 조별 평균 매출을 집계합니다.
-              </p>
+            <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+              <div>
+                <h2 className="font-bold text-base">
+                  {year}년 {month + 1}월 판매사원별 출근 배분 매출(USD) · 수량 및 조별(A/B/C/F) 평균
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  해당 일자 매장에 A·B·C·F조로 출근한 모든 사원에게 당일 매장 전체 매출(USD)과 판매 수량(PCS)을 동일하게 부여하여 집계합니다.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+                  <span className="text-[11px] font-semibold text-slate-600">정렬 기준:</span>
+                  <select
+                    value={sortField}
+                    onChange={(e) => setSortField(e.target.value)}
+                    className="text-xs font-semibold bg-white border border-slate-300 rounded px-2 py-1"
+                  >
+                    <option value="totalAllocatedRounded">총 배분매출</option>
+                    <option value="totalAllocatedQtyRounded">총 배분수량</option>
+                    <option value="overallAvg">출근일 평균매출</option>
+                    <option value="overallAvgQty">일 평균수량</option>
+                    <option value="workDaysCount">출근일수</option>
+                    <option value="group_A조">A조 평균</option>
+                    <option value="group_B조">B조 평균</option>
+                    <option value="group_C조">C조 평균</option>
+                    <option value="group_F조">F조 평균</option>
+                    <option value="staffName">사원명</option>
+                    <option value="storeName">소속 매장</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setSortDirection((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+                    className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-xs font-bold text-slate-700 inline-flex items-center gap-1"
+                  >
+                    {sortDirection === 'desc' ? (
+                      <>
+                        <ArrowDown className="w-3.5 h-3.5 text-indigo-600" />
+                        내림차순
+                      </>
+                    ) : (
+                      <>
+                        <ArrowUp className="w-3.5 h-3.5 text-indigo-600" />
+                        오름차순
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadStaffSalesExcel}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-900 text-white inline-flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  엑셀 다운로드
+                </button>
+              </div>
             </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-100 border-b border-slate-200 text-slate-600">
-                    <th className="py-2.5 px-3">사원명 (직책)</th>
-                    <th className="py-2.5 px-3">소속 매장</th>
-                    <th className="py-2.5 px-3 text-center">출근일수</th>
-                    <th className="py-2.5 px-3 text-right">총 배분매출</th>
-                    <th className="py-2.5 px-3 text-right">총 배분수량</th>
-                    <th className="py-2.5 px-3 text-right">출근일 평균매출</th>
-                    <th className="py-2.5 px-3 text-right">일 평균수량</th>
-                    <th className="py-2.5 px-3 text-right">A조 평균</th>
-                    <th className="py-2.5 px-3 text-right">B조 평균</th>
-                    <th className="py-2.5 px-3 text-right">C조 평균</th>
-                    <th className="py-2.5 px-3 text-right">F조 평균</th>
+                    <th className="py-2.5 px-3">
+                      <button type="button" onClick={() => handleHeaderSort('staffName')} className="font-bold inline-flex items-center hover:text-indigo-700">
+                        사원명 (직책){renderSortIcon('staffName')}
+                      </button>
+                    </th>
+                    <th className="py-2.5 px-3">
+                      <button type="button" onClick={() => handleHeaderSort('storeName')} className="font-bold inline-flex items-center hover:text-indigo-700">
+                        소속 매장{renderSortIcon('storeName')}
+                      </button>
+                    </th>
+                    <th className="py-2.5 px-3 text-center">
+                      <button type="button" onClick={() => handleHeaderSort('workDaysCount')} className="font-bold inline-flex items-center hover:text-indigo-700">
+                        출근일수{renderSortIcon('workDaysCount')}
+                      </button>
+                    </th>
+                    <th className="py-2.5 px-3 text-right">
+                      <button type="button" onClick={() => handleHeaderSort('totalAllocatedRounded')} className="font-bold inline-flex items-center justify-end hover:text-indigo-700">
+                        총 배분매출{renderSortIcon('totalAllocatedRounded')}
+                      </button>
+                    </th>
+                    <th className="py-2.5 px-3 text-right">
+                      <button type="button" onClick={() => handleHeaderSort('totalAllocatedQtyRounded')} className="font-bold inline-flex items-center justify-end hover:text-indigo-700">
+                        총 배분수량{renderSortIcon('totalAllocatedQtyRounded')}
+                      </button>
+                    </th>
+                    <th className="py-2.5 px-3 text-right">
+                      <button type="button" onClick={() => handleHeaderSort('overallAvg')} className="font-bold inline-flex items-center justify-end hover:text-indigo-700">
+                        출근일 평균매출{renderSortIcon('overallAvg')}
+                      </button>
+                    </th>
+                    <th className="py-2.5 px-3 text-right">
+                      <button type="button" onClick={() => handleHeaderSort('overallAvgQty')} className="font-bold inline-flex items-center justify-end hover:text-indigo-700">
+                        일 평균수량{renderSortIcon('overallAvgQty')}
+                      </button>
+                    </th>
+                    {WORK_GROUPS.map((g) => (
+                      <th key={g} className="py-2.5 px-3 text-right">
+                        <button type="button" onClick={() => handleHeaderSort('group_' + g)} className="font-bold inline-flex items-center justify-end hover:text-indigo-700">
+                          {g} 평균{renderSortIcon('group_' + g)}
+                        </button>
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {staffSalesAnalytics.map((row) => {
-                    const stName = stores.find((s) => s.id === row.staff.storeId)?.name || '미지정';
-                    return (
-                      <tr key={row.staff.id} className="border-b border-slate-100 hover:bg-slate-50/70">
-                        <td className="py-2.5 px-3 font-bold text-slate-800">
-                          {row.staff.name} <span className="font-normal text-slate-500">({row.staff.role})</span>
-                          {row.staff.status === 'RESIGNED' && (
-                            <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 font-semibold">퇴사</span>
-                          )}
+                  {sortedStaffSalesAnalytics.map((row) => (
+                    <tr key={row.staff.id} className="border-b border-slate-100 hover:bg-slate-50/70">
+                      <td className="py-2.5 px-3 font-bold text-slate-800">
+                        {row.staff.name} <span className="font-normal text-slate-500">({row.staff.role})</span>
+                        {row.staff.status === 'RESIGNED' && (
+                          <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 font-semibold">퇴사</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600">{row.storeName}</td>
+                      <td className="py-2.5 px-3 text-center font-semibold">{row.workDaysCount}일</td>
+                      <td className="py-2.5 px-3 text-right font-bold text-indigo-700">
+                        {formatUsd(row.totalAllocatedRounded)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-semibold text-slate-700">
+                        {formatQty(row.totalAllocatedQtyRounded)} PCS
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-semibold text-slate-800">
+                        {formatUsd(row.overallAvg)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-slate-600">
+                        {formatQty(row.overallAvgQty)} PCS
+                      </td>
+                      {WORK_GROUPS.map((g) => (
+                        <td key={g} className="py-2.5 px-3 text-right font-mono text-slate-700">
+                          {row.groupAverages[g] !== null ? formatUsd(row.groupAverages[g]) : '-'}
                         </td>
-                        <td className="py-2.5 px-3 text-slate-600">{stName}</td>
-                        <td className="py-2.5 px-3 text-center font-semibold">{row.workDaysCount}일</td>
-                        <td className="py-2.5 px-3 text-right font-bold text-indigo-700">
-                          {formatUsd(row.totalAllocatedRounded)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-semibold text-slate-700">
-                          {formatQty(row.totalAllocatedQtyRounded)} PCS
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-semibold text-slate-800">
-                          {formatUsd(row.overallAvg)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-slate-600">
-                          {formatQty(row.overallAvgQty)} PCS
-                        </td>
-                        {WORK_GROUPS.map((g) => (
-                          <td key={g} className="py-2.5 px-3 text-right font-mono text-slate-700">
-                            {row.groupAverages[g] !== null ? formatUsd(row.groupAverages[g]) : '-'}
-                          </td>
-                        ))}
-                      </tr>
-                    );
-                  })}
+                      ))}
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -1677,7 +1849,6 @@ export default function App() {
 
         {activeTab === 'leave' && (
           <div className="space-y-6">
-            {/* 매장/인원별 연차 현황 한눈에 보기 */}
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
               <div className="mb-3">
                 <h2 className="font-bold text-base">매장 / 인원별 연차 · 월차 현황</h2>
