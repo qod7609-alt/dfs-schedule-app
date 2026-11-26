@@ -77,6 +77,11 @@ const formatDays = (val) => {
   return Number.isInteger(num) ? String(num) : num.toFixed(1);
 };
 
+/**
+ * 입사년도(입사연월일) 기준 발생 연차/월차 자동 산출:
+ * - 입사 1년 미만: 입사일 이후 경과된 만근 개월 수만큼 월차(1개월당 1일, 최대 11일)
+ * - 입사 1년 이상: 근속연수 기준 연차(1년차 15일, 이후 2년마다 1일 가산 최대 25일)
+ */
 const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date()) => {
   if (!hireDateStr) return null;
   const parts = String(hireDateStr).split('-').map(Number);
@@ -85,7 +90,7 @@ const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date())
   if (Number.isNaN(hire.getTime())) return null;
 
   const ref = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate());
-  if (ref < hire) return { earned: 0, monthsWorked: 0, yearsWorked: 0, mode: 'UNDER_1Y' };
+  if (ref < hire) return { earned: 0, monthsWorked: 0, yearsWorked: 0, hireYear: parts[0], mode: 'UNDER_1Y' };
 
   let fullMonths = (ref.getFullYear() - hire.getFullYear()) * 12 + (ref.getMonth() - hire.getMonth());
   if (ref.getDate() < hire.getDate()) {
@@ -99,6 +104,7 @@ const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date())
       earned: monthlyLeave,
       monthsWorked: fullMonths,
       yearsWorked: 0,
+      hireYear: parts[0],
       mode: 'UNDER_1Y'
     };
   }
@@ -111,6 +117,7 @@ const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date())
     earned: annualDays,
     monthsWorked: fullMonths,
     yearsWorked,
+    hireYear: parts[0],
     mode: 'OVER_1Y'
   };
 };
@@ -233,13 +240,12 @@ export default function App() {
     [staffList]
   );
 
-  // 스케줄표(연차/반차) 및 승인된 휴가 신청과 연동한 직원별 부여/사용/남은 연차 계산
+  // 입사년도 기준 발생 연차 + 스케줄표(연차/반차) 및 승인된 휴가 신청과 연동한 사용/남은 연차 계산
   const leaveSummaryByStaff = useMemo(() => {
     const map = {};
     staffList.forEach((stf) => {
       const calc = calculateEarnedLeaveByHireDate(stf.hireDate);
 
-      // 스케줄표에서 해당 직원의 연차/반차 일자별 비용 수집 (날짜 기준 중복 방지)
       const scheduleLeaveByDate = {};
       Object.entries(schedules).forEach(([key, shiftCode]) => {
         if (shiftCode !== '연차' && shiftCode !== '반차') return;
@@ -252,7 +258,6 @@ export default function App() {
         }
       });
 
-      // 승인된 휴가 신청의 연차/반차 비용 수집
       const approvedLeaveByDate = {};
       leaveRequests
         .filter((r) => r.staffId === stf.id && r.status === '승인')
@@ -274,14 +279,16 @@ export default function App() {
       });
       used = Number(used.toFixed(1));
 
-      // 부여 연차 결정: 명시적 grantedLeave > 입사일 자동계산 > (annualLeave + used) 보완값
+      // 발생 연차: 입사년도 자동 계산값이 있으면 입사년도 기준을 우선 반영하고, 입사일이 없으면 기존 저장값 활용
       let granted;
-      if (stf.grantedLeave !== undefined && stf.grantedLeave !== null && stf.grantedLeave !== '') {
-        granted = Number(stf.grantedLeave) || 0;
-      } else if (calc) {
+      if (calc) {
         granted = calc.earned;
+      } else if (stf.grantedLeave !== undefined && stf.grantedLeave !== null && stf.grantedLeave !== '') {
+        granted = Number(stf.grantedLeave) || 0;
+      } else if (stf.annualLeave !== undefined && stf.annualLeave !== null && stf.annualLeave !== '') {
+        granted = Number((Number(stf.annualLeave) + used).toFixed(1));
       } else {
-        granted = Number((Number(stf.annualLeave ?? 0) + used).toFixed(1));
+        granted = used;
       }
 
       const remaining = Math.max(0, Number((granted - used).toFixed(1)));
@@ -409,7 +416,6 @@ export default function App() {
     if (!shiftCode) delete updated[key];
     else updated[key] = shiftCode;
 
-    // 스케줄에 연차/반차를 넣거나 뺄 때 직원 annualLeave 필드도 동기화 저장
     const prevCost = getLeaveCost(prevShift);
     const nextCost = getLeaveCost(shiftCode);
     const diffCost = nextCost - prevCost;
@@ -785,7 +791,9 @@ export default function App() {
     saveToCloud({ staffList: updated });
     alert(
       target.name +
-        ' 님의 자동 산출 연차/월차가 적용되었습니다.\n(' +
+        ' 님의 입사년도(' +
+        calc.hireYear +
+        '년) 기준 자동 발생 연차/월차가 적용되었습니다.\n(' +
         (calc.mode === 'UNDER_1Y'
           ? '1년 미만 만근 ' + calc.monthsWorked + '개월 → 월차 ' + calc.earned + '일'
           : '근속 ' + calc.yearsWorked + '년 → 연차 ' + calc.earned + '일') +
@@ -1893,7 +1901,7 @@ export default function App() {
               <div className="mb-3">
                 <h2 className="font-bold text-base">매장 / 인원별 연차 · 월차 현황</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  스케줄표에 입력된 연차(1일)/반차(0.5일) 및 승인된 휴가 내역이 사용 연차와 남은 연차에 실시간 반영됩니다.
+                  입사년도 기준 발생 연차(1년 미만 만근 월차 포함)와 스케줄표 연차(1일)/반차(0.5일)·승인 휴가 사용량이 실시간 반영됩니다.
                 </p>
               </div>
               <div className="overflow-x-auto">
@@ -2089,7 +2097,7 @@ export default function App() {
                     <Users className="w-4 h-4 text-indigo-600" />판매사원 계정 · 입사일 자동연차/월차 · 직책수정 · 퇴사처리
                   </h2>
                   <p className="text-xs text-slate-500 mb-3">
-                    입사일을 입력하면 1년 미만 직원은 만근 개월 수 기준 월차, 1년 이상 직원은 근속 기준 연차가 자동 계산됩니다. 퇴사 처리 시 계정이 정지되며 기존 이력은 유지됩니다.
+                    입사일을 입력하면 1년 미만 직원은 만근 개월 수 기준 월차, 1년 이상 직원은 입사년도 근속 기준 연차가 자동 계산됩니다. 퇴사 처리 시 계정이 정지되며 기존 이력은 유지됩니다.
                   </p>
                   <form onSubmit={handleAddStaff} className="grid grid-cols-1 sm:grid-cols-7 gap-2 mb-5 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
                     <input type="text" value={newStaffName} onChange={(e) => setNewStaffName(e.target.value)} placeholder="직원 성명" className="border border-slate-300 rounded-lg px-2.5 py-2 text-xs bg-white" required />
@@ -2191,7 +2199,7 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={() => handleApplyAutoLeaveByHireDate(stf.id)}
-                                    title="입사일 기준 연차/월차 자동 재계산 적용"
+                                    title="입사년도 기준 연차/월차 자동 재계산 적용"
                                     className="ml-1 px-1.5 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 text-[10px] font-bold"
                                   >
                                     자동계산
