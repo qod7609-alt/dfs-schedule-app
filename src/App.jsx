@@ -62,6 +62,14 @@ const getLeaveCost = (type) => {
   return 0;
 };
 
+const parseScheduleKey = (key) => {
+  if (!key || key.length < 12 || key[10] !== '_') return null;
+  return {
+    dateStr: key.slice(0, 10),
+    staffId: key.slice(11)
+  };
+};
+
 const formatUsd = (val) => {
   const num = Math.round(Number(val) || 0);
   return '$' + num.toLocaleString();
@@ -86,12 +94,6 @@ const formatHireYearMonth = (hireDateStr) => {
   return String(hireDateStr);
 };
 
-/**
- * 입사년월(YYYY-MM 또는 YYYY-MM-DD) 기준 발생 연차/월차 산출:
- * - 입사월 기준 경과 개월 수(fullMonths) 계산
- * - 1년 미만(fullMonths < 12): 경과 개월 수만큼 월차(최대 11일)
- * - 1년 이상(fullMonths >= 12): 근속연수 기준 연차(1년차 15일, 이후 2년마다 1일 가산 최대 25일)
- */
 const calculateEarnedLeaveByHireYearMonth = (hireDateStr, referenceDate = new Date()) => {
   if (!hireDateStr) return null;
   const parts = String(hireDateStr).split('-').map(Number);
@@ -263,7 +265,6 @@ export default function App() {
     [staffList]
   );
 
-  // 스케줄표(연차 1일 / 반차 0.5일) 및 승인된 휴가 신청과 실시간 연동되는 부여·사용·남은 연차 계산
   const leaveSummaryByStaff = useMemo(() => {
     const map = {};
     staffList.forEach((stf) => {
@@ -272,12 +273,10 @@ export default function App() {
       const scheduleLeaveByDate = {};
       Object.entries(schedules).forEach(([key, shiftCode]) => {
         if (shiftCode !== '연차' && shiftCode !== '반차') return;
-        const idx = key.lastIndexOf('_');
-        if (idx === -1) return;
-        const dt = key.slice(0, idx);
-        const sId = key.slice(idx + 1);
-        if (sId === stf.id) {
-          scheduleLeaveByDate[dt] = getLeaveCost(shiftCode);
+        const parsed = parseScheduleKey(key);
+        if (!parsed) return;
+        if (parsed.staffId === stf.id) {
+          scheduleLeaveByDate[parsed.dateStr] = getLeaveCost(shiftCode);
         }
       });
 
@@ -439,16 +438,13 @@ export default function App() {
     if (!shiftCode) delete updatedSchedules[key];
     else updatedSchedules[key] = shiftCode;
 
-    // 변경된 스케줄 기준으로 실제 사용 연차 재계산
     const scheduleLeaveByDate = {};
     Object.entries(updatedSchedules).forEach(([k, code]) => {
       if (code !== '연차' && code !== '반차') return;
-      const idx = k.lastIndexOf('_');
-      if (idx === -1) return;
-      const dt = k.slice(0, idx);
-      const sId = k.slice(idx + 1);
-      if (sId === staff.id) {
-        scheduleLeaveByDate[dt] = getLeaveCost(code);
+      const parsed = parseScheduleKey(k);
+      if (!parsed) return;
+      if (parsed.staffId === staff.id) {
+        scheduleLeaveByDate[parsed.dateStr] = getLeaveCost(code);
       }
     });
 
