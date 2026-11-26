@@ -4,7 +4,7 @@ import {
   LogOut, Plus, Trash2, CheckCircle2, XCircle, Edit3, KeyRound, ChevronLeft,
   ChevronRight, AlertCircle, ShieldCheck, UserCheck, FileSpreadsheet,
   Download, ShieldAlert, Send, RotateCcw, BarChart3, UserX, ArrowUpDown,
-  ArrowUp, ArrowDown
+  ArrowUp, ArrowDown, TableProperties
 } from 'lucide-react';
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
@@ -36,11 +36,11 @@ const DEFAULT_STORES = [
 ];
 
 const DEFAULT_STAFF = [
-  { id: 'staff_1', name: '김민지', storeId: 'store_1', role: '매니저', pin: '1111', annualLeave: 15, hireDate: '2023-03-01', status: 'ACTIVE' },
-  { id: 'staff_2', name: '이서연', storeId: 'store_1', role: '시니어', pin: '2222', annualLeave: 15, hireDate: '2024-01-10', status: 'ACTIVE' },
-  { id: 'staff_3', name: '박지훈', storeId: 'store_2', role: '매니저', pin: '3333', annualLeave: 15, hireDate: '2022-07-01', status: 'ACTIVE' },
-  { id: 'staff_4', name: '최수빈', storeId: 'store_3', role: '매니저', pin: '4444', annualLeave: 15, hireDate: '2023-11-15', status: 'ACTIVE' },
-  { id: 'staff_5', name: '정현우', storeId: 'store_4', role: '사원', pin: '5555', annualLeave: 12, hireDate: '2026-04-01', status: 'ACTIVE' }
+  { id: 'staff_1', name: '김민지', storeId: 'store_1', role: '매니저', pin: '1111', annualLeave: 15, grantedLeave: 15, hireDate: '2023-03-01', status: 'ACTIVE' },
+  { id: 'staff_2', name: '이서연', storeId: 'store_1', role: '시니어', pin: '2222', annualLeave: 15, grantedLeave: 15, hireDate: '2024-01-10', status: 'ACTIVE' },
+  { id: 'staff_3', name: '박지훈', storeId: 'store_2', role: '매니저', pin: '3333', annualLeave: 15, grantedLeave: 15, hireDate: '2022-07-01', status: 'ACTIVE' },
+  { id: 'staff_4', name: '최수빈', storeId: 'store_3', role: '매니저', pin: '4444', annualLeave: 15, grantedLeave: 15, hireDate: '2023-11-15', status: 'ACTIVE' },
+  { id: 'staff_5', name: '정현우', storeId: 'store_4', role: '사원', pin: '5555', annualLeave: 12, grantedLeave: 12, hireDate: '2026-04-01', status: 'ACTIVE' }
 ];
 
 const WORK_GROUPS = ['A조', 'B조', 'C조', 'F조'];
@@ -77,26 +77,45 @@ const formatDays = (val) => {
   return Number.isInteger(num) ? String(num) : num.toFixed(1);
 };
 
+const formatHireYearMonth = (hireDateStr) => {
+  if (!hireDateStr) return '-';
+  const parts = String(hireDateStr).split('-').filter(Boolean);
+  if (parts.length >= 2) {
+    return parts[0] + '-' + String(parts[1]).padStart(2, '0');
+  }
+  return String(hireDateStr);
+};
+
 /**
- * 입사년도(입사연월일) 기준 발생 연차/월차 자동 산출:
- * - 입사 1년 미만: 입사일 이후 경과된 만근 개월 수만큼 월차(1개월당 1일, 최대 11일)
- * - 입사 1년 이상: 근속연수 기준 연차(1년차 15일, 이후 2년마다 1일 가산 최대 25일)
+ * 입사년월(YYYY-MM 또는 YYYY-MM-DD) 기준 발생 연차/월차 산출:
+ * - 입사월 기준 경과 개월 수(fullMonths) 계산
+ * - 1년 미만(fullMonths < 12): 경과 개월 수만큼 월차(최대 11일)
+ * - 1년 이상(fullMonths >= 12): 근속연수 기준 연차(1년차 15일, 이후 2년마다 1일 가산 최대 25일)
  */
-const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date()) => {
+const calculateEarnedLeaveByHireYearMonth = (hireDateStr, referenceDate = new Date()) => {
   if (!hireDateStr) return null;
   const parts = String(hireDateStr).split('-').map(Number);
-  if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) return null;
-  const hire = new Date(parts[0], parts[1] - 1, parts[2]);
-  if (Number.isNaN(hire.getTime())) return null;
+  const hireYear = parts[0];
+  const hireMonth = parts[1];
+  if (!hireYear || !hireMonth || hireMonth < 1 || hireMonth > 12) return null;
 
-  const ref = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate());
-  if (ref < hire) return { earned: 0, monthsWorked: 0, yearsWorked: 0, hireYear: parts[0], mode: 'UNDER_1Y' };
+  const refYear = referenceDate.getFullYear();
+  const refMonth = referenceDate.getMonth() + 1;
 
-  let fullMonths = (ref.getFullYear() - hire.getFullYear()) * 12 + (ref.getMonth() - hire.getMonth());
-  if (ref.getDate() < hire.getDate()) {
-    fullMonths -= 1;
+  const totalMonthsDiff = (refYear - hireYear) * 12 + (refMonth - hireMonth);
+  if (totalMonthsDiff < 0) {
+    return {
+      earned: 0,
+      monthsWorked: 0,
+      yearsWorked: 0,
+      hireYear,
+      hireMonth,
+      yearMonthLabel: hireYear + '-' + String(hireMonth).padStart(2, '0'),
+      mode: 'UNDER_1Y'
+    };
   }
-  fullMonths = Math.max(0, fullMonths);
+
+  const fullMonths = totalMonthsDiff;
 
   if (fullMonths < 12) {
     const monthlyLeave = Math.min(11, fullMonths);
@@ -104,7 +123,9 @@ const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date())
       earned: monthlyLeave,
       monthsWorked: fullMonths,
       yearsWorked: 0,
-      hireYear: parts[0],
+      hireYear,
+      hireMonth,
+      yearMonthLabel: hireYear + '-' + String(hireMonth).padStart(2, '0'),
       mode: 'UNDER_1Y'
     };
   }
@@ -117,7 +138,9 @@ const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date())
     earned: annualDays,
     monthsWorked: fullMonths,
     yearsWorked,
-    hireYear: parts[0],
+    hireYear,
+    hireMonth,
+    yearMonthLabel: hireYear + '-' + String(hireMonth).padStart(2, '0'),
     mode: 'OVER_1Y'
   };
 };
@@ -240,11 +263,11 @@ export default function App() {
     [staffList]
   );
 
-  // 입사년도 기준 발생 연차 + 스케줄표(연차/반차) 및 승인된 휴가 신청과 연동한 사용/남은 연차 계산
+  // 스케줄표(연차 1일 / 반차 0.5일) 및 승인된 휴가 신청과 실시간 연동되는 부여·사용·남은 연차 계산
   const leaveSummaryByStaff = useMemo(() => {
     const map = {};
     staffList.forEach((stf) => {
-      const calc = calculateEarnedLeaveByHireDate(stf.hireDate);
+      const calc = calculateEarnedLeaveByHireYearMonth(stf.hireDate);
 
       const scheduleLeaveByDate = {};
       Object.entries(schedules).forEach(([key, shiftCode]) => {
@@ -279,9 +302,10 @@ export default function App() {
       });
       used = Number(used.toFixed(1));
 
-      // 발생 연차: 입사년도 자동 계산값이 있으면 입사년도 기준을 우선 반영하고, 입사일이 없으면 기존 저장값 활용
       let granted;
-      if (calc) {
+      if (stf.manualGrantedLeave !== undefined && stf.manualGrantedLeave !== null && stf.manualGrantedLeave !== '') {
+        granted = Number(stf.manualGrantedLeave) || 0;
+      } else if (calc) {
         granted = calc.earned;
       } else if (stf.grantedLeave !== undefined && stf.grantedLeave !== null && stf.grantedLeave !== '') {
         granted = Number(stf.grantedLeave) || 0;
@@ -411,43 +435,61 @@ export default function App() {
     }
 
     const key = dateStr + '_' + staff.id;
-    const prevShift = schedules[key] || '';
-    const updated = { ...schedules };
-    if (!shiftCode) delete updated[key];
-    else updated[key] = shiftCode;
+    const updatedSchedules = { ...schedules };
+    if (!shiftCode) delete updatedSchedules[key];
+    else updatedSchedules[key] = shiftCode;
 
-    const prevCost = getLeaveCost(prevShift);
-    const nextCost = getLeaveCost(shiftCode);
-    const diffCost = nextCost - prevCost;
-    let updatedStaffList = staffList;
-    if (diffCost !== 0) {
-      const currentSummary = leaveSummaryByStaff[staff.id];
-      const baseGranted =
-        currentSummary !== undefined
-          ? currentSummary.granted
-          : Number((Number(staff.annualLeave ?? 0) + prevCost).toFixed(1));
-      const baseUsed = currentSummary !== undefined ? currentSummary.used : prevCost;
-      const nextUsed = Math.max(0, Number((baseUsed + diffCost).toFixed(1)));
-      const nextRemaining = Math.max(0, Number((baseGranted - nextUsed).toFixed(1)));
+    // 변경된 스케줄 기준으로 실제 사용 연차 재계산
+    const scheduleLeaveByDate = {};
+    Object.entries(updatedSchedules).forEach(([k, code]) => {
+      if (code !== '연차' && code !== '반차') return;
+      const idx = k.lastIndexOf('_');
+      if (idx === -1) return;
+      const dt = k.slice(0, idx);
+      const sId = k.slice(idx + 1);
+      if (sId === staff.id) {
+        scheduleLeaveByDate[dt] = getLeaveCost(code);
+      }
+    });
 
-      updatedStaffList = staffList.map((s) =>
-        s.id === staff.id
-          ? {
-              ...s,
-              grantedLeave: baseGranted,
-              annualLeave: nextRemaining
-            }
-          : s
-      );
-      setStaffList(updatedStaffList);
-    }
+    const approvedLeaveByDate = {};
+    leaveRequests
+      .filter((r) => r.staffId === staff.id && r.status === '승인')
+      .forEach((r) => {
+        const cost = r.cost !== undefined ? Number(r.cost) : getLeaveCost(r.type);
+        if (cost > 0 && r.date) {
+          approvedLeaveByDate[r.date] = Math.max(approvedLeaveByDate[r.date] || 0, cost);
+        }
+      });
 
-    setSchedules(updated);
-    saveToCloud(
-      diffCost !== 0
-        ? { schedules: updated, staffList: updatedStaffList }
-        : { schedules: updated }
+    const allUsedDates = new Set([
+      ...Object.keys(scheduleLeaveByDate),
+      ...Object.keys(approvedLeaveByDate)
+    ]);
+
+    let nextUsed = 0;
+    allUsedDates.forEach((dt) => {
+      nextUsed += Math.max(scheduleLeaveByDate[dt] || 0, approvedLeaveByDate[dt] || 0);
+    });
+    nextUsed = Number(nextUsed.toFixed(1));
+
+    const summary = leaveSummaryByStaff[staff.id];
+    const granted = summary ? summary.granted : Number(staff.annualLeave ?? 0);
+    const nextRemaining = Math.max(0, Number((granted - nextUsed).toFixed(1)));
+
+    const updatedStaffList = staffList.map((s) =>
+      s.id === staff.id
+        ? {
+            ...s,
+            grantedLeave: granted,
+            annualLeave: nextRemaining
+          }
+        : s
     );
+
+    setSchedules(updatedSchedules);
+    setStaffList(updatedStaffList);
+    saveToCloud({ schedules: updatedSchedules, staffList: updatedStaffList });
   };
 
   const handleRequestScheduleApproval = (storeId) => {
@@ -705,7 +747,7 @@ export default function App() {
 
   const handleHireDateInputChange = (val) => {
     setNewStaffHireDate(val);
-    const calc = calculateEarnedLeaveByHireDate(val);
+    const calc = calculateEarnedLeaveByHireYearMonth(val);
     if (calc) {
       setNewStaffAnnualLeave(String(calc.earned));
     }
@@ -717,7 +759,7 @@ export default function App() {
       alert('성명과 4자리 PIN을 확인해 주세요.');
       return;
     }
-    const calc = calculateEarnedLeaveByHireDate(newStaffHireDate);
+    const calc = calculateEarnedLeaveByHireYearMonth(newStaffHireDate);
     const leaveDays =
       newStaffAnnualLeave !== ''
         ? Math.max(0, Number(newStaffAnnualLeave) || 0)
@@ -751,18 +793,20 @@ export default function App() {
   };
 
   const handleUpdateStaffHireDate = (staffId, nextHireDate) => {
-    const calc = calculateEarnedLeaveByHireDate(nextHireDate);
+    const calc = calculateEarnedLeaveByHireYearMonth(nextHireDate);
     const updated = staffList.map((s) => {
       if (s.id !== staffId) return s;
       const nextGranted = calc ? calc.earned : s.grantedLeave ?? s.annualLeave ?? 0;
       const used = leaveSummaryByStaff[staffId]?.used ?? 0;
       const nextRemain = Math.max(0, Number((nextGranted - used).toFixed(1)));
-      return {
+      const copy = {
         ...s,
         hireDate: nextHireDate,
         grantedLeave: nextGranted,
         annualLeave: nextRemain
       };
+      delete copy.manualGrantedLeave;
+      return copy;
     });
     setStaffList(updated);
     saveToCloud({ staffList: updated });
@@ -775,27 +819,28 @@ export default function App() {
       alert('먼저 입사년월일을 입력해 주세요.');
       return;
     }
-    const calc = calculateEarnedLeaveByHireDate(target.hireDate);
+    const calc = calculateEarnedLeaveByHireYearMonth(target.hireDate);
     if (!calc) {
       alert('올바른 입사년월일 형식이 아닙니다.');
       return;
     }
     const used = leaveSummaryByStaff[staffId]?.used ?? 0;
     const nextRemain = Math.max(0, Number((calc.earned - used).toFixed(1)));
-    const updated = staffList.map((s) =>
-      s.id === staffId
-        ? { ...s, grantedLeave: calc.earned, annualLeave: nextRemain }
-        : s
-    );
+    const updated = staffList.map((s) => {
+      if (s.id !== staffId) return s;
+      const copy = { ...s, grantedLeave: calc.earned, annualLeave: nextRemain };
+      delete copy.manualGrantedLeave;
+      return copy;
+    });
     setStaffList(updated);
     saveToCloud({ staffList: updated });
     alert(
       target.name +
-        ' 님의 입사년도(' +
-        calc.hireYear +
-        '년) 기준 자동 발생 연차/월차가 적용되었습니다.\n(' +
+        ' 님의 입사년월(' +
+        calc.yearMonthLabel +
+        ') 기준 자동 발생 연차/월차가 적용되었습니다.\n(' +
         (calc.mode === 'UNDER_1Y'
-          ? '1년 미만 만근 ' + calc.monthsWorked + '개월 → 월차 ' + calc.earned + '일'
+          ? '1년 미만 경과 ' + calc.monthsWorked + '개월 → 월차 ' + calc.earned + '일'
           : '근속 ' + calc.yearsWorked + '년 → 연차 ' + calc.earned + '일') +
         ', 사용 ' +
         used +
@@ -812,6 +857,7 @@ export default function App() {
       const used = leaveSummaryByStaff[staffId]?.used ?? 0;
       return {
         ...s,
+        manualGrantedLeave: parsed,
         grantedLeave: parsed,
         annualLeave: Math.max(0, Number((parsed - used).toFixed(1)))
       };
@@ -914,6 +960,113 @@ export default function App() {
     });
     return byStore;
   }, [salesRecords, stores, currentMonthPrefix]);
+
+  const targetStoresForDailyMatrix = useMemo(() => {
+    if (isAdmin) {
+      return selectedStoreId === 'ALL'
+        ? stores
+        : stores.filter((st) => st.id === selectedStoreId);
+    }
+    return stores.filter((st) => st.id === activeStaffProfile?.storeId);
+  }, [isAdmin, selectedStoreId, stores, activeStaffProfile]);
+
+  const dailyStoreMatrix = useMemo(() => {
+    const storeTotals = {};
+    targetStoresForDailyMatrix.forEach((st) => {
+      storeTotals[st.id] = { amount: 0, quantity: 0 };
+    });
+
+    let grandTotalAmount = 0;
+    let grandTotalQuantity = 0;
+    let activeSalesDaysCount = 0;
+
+    const rows = daysInMonth.map((d) => {
+      const cells = {};
+      let dayAmount = 0;
+      let dayQuantity = 0;
+
+      targetStoresForDailyMatrix.forEach((st) => {
+        const rec = salesRecords[d.dateStr + '_' + st.id];
+        const amt = Number(rec?.amount) || 0;
+        const qty = Number(rec?.quantity) || 0;
+        cells[st.id] = { amount: amt, quantity: qty };
+        dayAmount += amt;
+        dayQuantity += qty;
+        storeTotals[st.id].amount += amt;
+        storeTotals[st.id].quantity += qty;
+      });
+
+      if (dayAmount > 0 || dayQuantity > 0) {
+        activeSalesDaysCount += 1;
+      }
+
+      grandTotalAmount += dayAmount;
+      grandTotalQuantity += dayQuantity;
+
+      return {
+        ...d,
+        cells,
+        dayAmount,
+        dayQuantity
+      };
+    });
+
+    const avgDailyAmount =
+      activeSalesDaysCount > 0 ? Math.round(grandTotalAmount / activeSalesDaysCount) : 0;
+
+    return {
+      rows,
+      storeTotals,
+      grandTotalAmount,
+      grandTotalQuantity,
+      activeSalesDaysCount,
+      avgDailyAmount
+    };
+  }, [daysInMonth, targetStoresForDailyMatrix, salesRecords]);
+
+  const handleDownloadDailySalesExcel = () => {
+    const headers = [
+      '일자',
+      '요일',
+      ...targetStoresForDailyMatrix.flatMap((st) => [st.name + ' 매출(USD)', st.name + ' 수량(PCS)']),
+      '일별 합계 매출(USD)',
+      '일별 합계 수량(PCS)'
+    ];
+
+    const rows = dailyStoreMatrix.rows.map((r) => [
+      r.dateStr,
+      r.dayName,
+      ...targetStoresForDailyMatrix.flatMap((st) => [
+        r.cells[st.id]?.amount || 0,
+        r.cells[st.id]?.quantity || 0
+      ]),
+      r.dayAmount,
+      r.dayQuantity
+    ]);
+
+    rows.push([
+      '매장별 합계',
+      '',
+      ...targetStoresForDailyMatrix.flatMap((st) => [
+        dailyStoreMatrix.storeTotals[st.id]?.amount || 0,
+        dailyStoreMatrix.storeTotals[st.id]?.quantity || 0
+      ]),
+      dailyStoreMatrix.grandTotalAmount,
+      dailyStoreMatrix.grandTotalQuantity
+    ]);
+
+    const filterLabel = isAdmin
+      ? selectedStoreId === 'ALL'
+        ? '전체매장'
+        : stores.find((s) => s.id === selectedStoreId)?.name || '매장'
+      : myStoreObj?.name || '매장';
+
+    triggerCsvDownload(
+      '일별_매장별_매출합계_' + currentMonthPrefix + '_' + filterLabel + '.csv',
+      headers,
+      rows
+    );
+  };
 
   const staffSalesAnalytics = useMemo(() => {
     const statsByStaff = {};
@@ -1306,6 +1459,14 @@ export default function App() {
             <TrendingUp className="w-4 h-4" />일매출(USD) · 수량입력
           </button>
           <button
+            onClick={() => setActiveTab('daily_sales_summary')}
+            className={activeTab === 'daily_sales_summary'
+              ? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+              : 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+          >
+            <TableProperties className="w-4 h-4" />일별 매출 합계
+          </button>
+          <button
             onClick={() => setActiveTab('staff_sales')}
             className={activeTab === 'staff_sales'
               ? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
@@ -1512,7 +1673,7 @@ export default function App() {
                             <span className="text-[10px] text-slate-500 font-normal">({staff.role})</span>
                           </div>
                           <div className="text-[10px] text-slate-400 truncate max-w-[130px]">
-                            {stObj?.name} · 연차 {formatDays(remLeave)}일
+                            {stObj?.name} · 잔여 {formatDays(remLeave)}일
                           </div>
                         </td>
                         {daysInMonth.map((d) => {
@@ -1584,7 +1745,7 @@ export default function App() {
                 <FileSpreadsheet className="w-4 h-4 text-indigo-600" />일매출(USD) · 수량 마감 등록
               </h2>
               <p className="text-xs text-slate-500 mb-4">
-                1 USD 단위 금액과 판매 수량(PCS)을 등록하면 매장 목표와 [사원별 배분집계] 탭에 실시간 반영됩니다.
+                1 USD 단위 금액과 판매 수량(PCS)을 등록하면 매장 목표와 [일별 매출 합계] 및 [사원별 배분집계] 탭에 실시간 반영됩니다.
               </p>
               <form onSubmit={handleSaveSales} className="space-y-3.5">
                 <div>
@@ -1696,15 +1857,24 @@ export default function App() {
               </div>
 
               <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
                   <h3 className="font-bold text-base">당월 일매출 · 판매수량 입력 내역</h3>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('staff_sales')}
-                    className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 underline"
-                  >
-                    사원별 출근 배분집계 탭으로 이동 →
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('daily_sales_summary')}
+                      className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 underline"
+                    >
+                      일별 매출 합계 탭 보기 →
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('staff_sales')}
+                      className="text-xs font-semibold text-slate-600 hover:text-slate-800 underline"
+                    >
+                      사원별 배분집계 →
+                    </button>
+                  </div>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs text-left">
@@ -1744,6 +1914,142 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'daily_sales_summary' && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+                <div className="text-[11px] font-semibold text-slate-500">당월 총 매출 합계 (USD)</div>
+                <div className="text-lg sm:text-xl font-bold text-indigo-700 mt-1">
+                  {formatUsd(dailyStoreMatrix.grandTotalAmount)}
+                </div>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+                <div className="text-[11px] font-semibold text-slate-500">당월 총 판매 수량 합계</div>
+                <div className="text-lg sm:text-xl font-bold text-slate-800 mt-1">
+                  {formatQty(dailyStoreMatrix.grandTotalQuantity)} PCS
+                </div>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+                <div className="text-[11px] font-semibold text-slate-500">매출 입력 일수</div>
+                <div className="text-lg sm:text-xl font-bold text-slate-800 mt-1">
+                  {dailyStoreMatrix.activeSalesDaysCount}일
+                </div>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+                <div className="text-[11px] font-semibold text-slate-500">입력일 기준 일 평균 매출</div>
+                <div className="text-lg sm:text-xl font-bold text-emerald-700 mt-1">
+                  {formatUsd(dailyStoreMatrix.avgDailyAmount)}
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <div>
+                  <h2 className="font-bold text-base">
+                    {year}년 {month + 1}월 일자별 · 매장별 매출 합계표
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    각 일자별 매장 매출(USD)과 수량(PCS), 행 끝 [일자별 합계], 표 하단 [매장별 합계]를 한 번에 확인할 수 있습니다.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDownloadDailySalesExcel}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-900 text-white inline-flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  엑셀 다운로드
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-100 border-b border-slate-200 text-slate-700">
+                      <th className="sticky left-0 z-20 bg-slate-100 px-3 py-2.5 text-left font-bold min-w-[105px] border-r border-slate-200">
+                        일자
+                      </th>
+                      {targetStoresForDailyMatrix.map((st) => (
+                        <th key={st.id} className="px-2.5 py-2 text-right font-bold min-w-[125px] border-r border-slate-200">
+                          <div className="truncate max-w-[130px] ml-auto" title={st.name}>{st.name}</div>
+                          <div className="text-[10px] font-normal text-slate-500">매출(USD) / 수량</div>
+                        </th>
+                      ))}
+                      <th className="px-3 py-2 text-right font-bold min-w-[135px] bg-indigo-50 text-indigo-950">
+                        <div>일자별 합계</div>
+                        <div className="text-[10px] font-normal text-indigo-700">매출(USD) / 수량</div>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dailyStoreMatrix.rows.map((r) => {
+                      const hasSales = r.dayAmount > 0 || r.dayQuantity > 0;
+                      return (
+                        <tr
+                          key={r.dateStr}
+                          className={hasSales ? 'border-b border-slate-100 hover:bg-slate-50/70' : 'border-b border-slate-100 text-slate-400 hover:bg-slate-50/40'}
+                        >
+                          <td className="sticky left-0 z-10 bg-white px-3 py-2 font-semibold border-r border-slate-200 whitespace-nowrap">
+                            <span className={r.dayOfWeek === 0 ? 'text-rose-600' : r.dayOfWeek === 6 ? 'text-blue-600' : 'text-slate-800'}>
+                              {r.day}일 ({r.dayName})
+                            </span>
+                          </td>
+                          {targetStoresForDailyMatrix.map((st) => {
+                            const cell = r.cells[st.id] || { amount: 0, quantity: 0 };
+                            const activeCell = cell.amount > 0 || cell.quantity > 0;
+                            return (
+                              <td key={st.id} className="px-2.5 py-2 text-right border-r border-slate-100 whitespace-nowrap">
+                                {activeCell ? (
+                                  <div>
+                                    <div className="font-bold text-slate-800">{formatUsd(cell.amount)}</div>
+                                    <div className="text-[10px] text-indigo-600 font-semibold">{formatQty(cell.quantity)} PCS</div>
+                                  </div>
+                                ) : (
+                                  <span>-</span>
+                                )}
+                              </td>
+                            );
+                          })}
+                          <td className="px-3 py-2 text-right bg-indigo-50/60 font-semibold whitespace-nowrap">
+                            {hasSales ? (
+                              <div>
+                                <div className="font-bold text-indigo-800">{formatUsd(r.dayAmount)}</div>
+                                <div className="text-[10px] text-indigo-600">{formatQty(r.dayQuantity)} PCS</div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    <tr className="bg-indigo-100/80 border-t-2 border-indigo-300 font-bold text-slate-900">
+                      <td className="sticky left-0 z-10 bg-indigo-100 px-3 py-2.5 border-r border-indigo-200 whitespace-nowrap">
+                        매장별 합계
+                      </td>
+                      {targetStoresForDailyMatrix.map((st) => {
+                        const tot = dailyStoreMatrix.storeTotals[st.id] || { amount: 0, quantity: 0 };
+                        return (
+                          <td key={st.id} className="px-2.5 py-2.5 text-right border-r border-indigo-200 whitespace-nowrap">
+                            <div className="font-bold text-indigo-950">{formatUsd(tot.amount)}</div>
+                            <div className="text-[10px] font-semibold text-indigo-700">{formatQty(tot.quantity)} PCS</div>
+                          </td>
+                        );
+                      })}
+                      <td className="px-3 py-2.5 text-right bg-indigo-200/70 whitespace-nowrap">
+                        <div className="font-extrabold text-indigo-950">{formatUsd(dailyStoreMatrix.grandTotalAmount)}</div>
+                        <div className="text-[10px] font-bold text-indigo-800">{formatQty(dailyStoreMatrix.grandTotalQuantity)} PCS</div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -1901,7 +2207,7 @@ export default function App() {
               <div className="mb-3">
                 <h2 className="font-bold text-base">매장 / 인원별 연차 · 월차 현황</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  입사년도 기준 발생 연차(1년 미만 만근 월차 포함)와 스케줄표 연차(1일)/반차(0.5일)·승인 휴가 사용량이 실시간 반영됩니다.
+                  입사년월 기준 발생 연차/월차와 스케줄표 연차(1일)/반차(0.5일)·승인 휴가 사용량이 실시간 반영됩니다.
                 </p>
               </div>
               <div className="overflow-x-auto">
@@ -1910,7 +2216,7 @@ export default function App() {
                     <tr className="bg-slate-100 border-b border-slate-200 text-slate-600">
                       <th className="py-2.5 px-3">매장</th>
                       <th className="py-2.5 px-3">성명 (직책)</th>
-                      <th className="py-2.5 px-3 text-center">입사일</th>
+                      <th className="py-2.5 px-3 text-center">입사년월</th>
                       <th className="py-2.5 px-3 text-center">부여 연차</th>
                       <th className="py-2.5 px-3 text-center">사용 연차</th>
                       <th className="py-2.5 px-3 text-center">남은 연차</th>
@@ -1926,7 +2232,7 @@ export default function App() {
                             <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 font-semibold">퇴사</span>
                           )}
                         </td>
-                        <td className="py-2.5 px-3 text-center font-mono text-slate-600">{row.staff.hireDate || '-'}</td>
+                        <td className="py-2.5 px-3 text-center font-mono text-slate-600">{formatHireYearMonth(row.staff.hireDate)}</td>
                         <td className="py-2.5 px-3 text-center font-semibold text-slate-700">{formatDays(row.granted)}일</td>
                         <td className="py-2.5 px-3 text-center font-semibold text-amber-700">{formatDays(row.used)}일</td>
                         <td className="py-2.5 px-3 text-center font-bold text-indigo-700">{formatDays(row.remaining)}일</td>
@@ -2094,10 +2400,10 @@ export default function App() {
 
                 <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
                   <h2 className="font-bold text-base mb-1 flex items-center gap-1.5">
-                    <Users className="w-4 h-4 text-indigo-600" />판매사원 계정 · 입사일 자동연차/월차 · 직책수정 · 퇴사처리
+                    <Users className="w-4 h-4 text-indigo-600" />판매사원 계정 · 입사년월 자동연차/월차 · 직책수정 · 퇴사처리
                   </h2>
                   <p className="text-xs text-slate-500 mb-3">
-                    입사일을 입력하면 1년 미만 직원은 만근 개월 수 기준 월차, 1년 이상 직원은 입사년도 근속 기준 연차가 자동 계산됩니다. 퇴사 처리 시 계정이 정지되며 기존 이력은 유지됩니다.
+                    입사년월을 입력하면 1년 미만 직원은 경과 개월 수 기준 월차, 1년 이상 직원은 입사년월 근속 기준 연차가 자동 계산됩니다. 퇴사 처리 시 계정이 정지되며 기존 이력은 유지됩니다.
                   </p>
                   <form onSubmit={handleAddStaff} className="grid grid-cols-1 sm:grid-cols-7 gap-2 mb-5 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
                     <input type="text" value={newStaffName} onChange={(e) => setNewStaffName(e.target.value)} placeholder="직원 성명" className="border border-slate-300 rounded-lg px-2.5 py-2 text-xs bg-white" required />
@@ -2137,7 +2443,7 @@ export default function App() {
                           <th className="py-2 px-1.5">성명 / 상태</th>
                           <th className="py-2 px-1.5">소속 매장</th>
                           <th className="py-2 px-1.5">직책</th>
-                          <th className="py-2 px-1.5 text-center">입사일</th>
+                          <th className="py-2 px-1.5 text-center">입사년월</th>
                           <th className="py-2 px-1.5 text-center">부여연차(자동/수정)</th>
                           <th className="py-2 px-1.5 text-center">잔여</th>
                           <th className="py-2 px-1.5">PIN</th>
@@ -2199,7 +2505,7 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={() => handleApplyAutoLeaveByHireDate(stf.id)}
-                                    title="입사년도 기준 연차/월차 자동 재계산 적용"
+                                    title="입사년월 기준 연차/월차 자동 재계산 적용"
                                     className="ml-1 px-1.5 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 text-[10px] font-bold"
                                   >
                                     자동계산
