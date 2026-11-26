@@ -138,7 +138,6 @@ export default function App() {
   const [selectedStoreId, setSelectedStoreId] = useState('ALL');
   const [currentDate, setCurrentDate] = useState(() => new Date());
 
-  // 사원별 배분집계표 정렬 상태
   const [sortField, setSortField] = useState('totalAllocatedRounded');
   const [sortDirection, setSortDirection] = useState('desc');
 
@@ -234,46 +233,58 @@ export default function App() {
     [staffList]
   );
 
+  // 스케줄표(연차/반차) 및 승인된 휴가 신청과 연동한 직원별 부여/사용/남은 연차 계산
   const leaveSummaryByStaff = useMemo(() => {
     const map = {};
     staffList.forEach((stf) => {
       const calc = calculateEarnedLeaveByHireDate(stf.hireDate);
-      const granted =
-        stf.grantedLeave !== undefined && stf.grantedLeave !== null
-          ? Number(stf.grantedLeave)
-          : calc
-          ? calc.earned
-          : Number(stf.annualLeave ?? 0);
 
-      const approvedReqUsed = leaveRequests
-        .filter((r) => r.staffId === stf.id && r.status === '승인')
-        .reduce((acc, r) => acc + (r.cost !== undefined ? Number(r.cost) : getLeaveCost(r.type)), 0);
-
-      const approvedDates = new Set(
-        leaveRequests.filter((r) => r.staffId === stf.id && r.status === '승인').map((r) => r.date)
-      );
-      let scheduleOnlyUsed = 0;
+      // 스케줄표에서 해당 직원의 연차/반차 일자별 비용 수집 (날짜 기준 중복 방지)
+      const scheduleLeaveByDate = {};
       Object.entries(schedules).forEach(([key, shiftCode]) => {
         if (shiftCode !== '연차' && shiftCode !== '반차') return;
         const idx = key.lastIndexOf('_');
         if (idx === -1) return;
         const dt = key.slice(0, idx);
         const sId = key.slice(idx + 1);
-        if (sId === stf.id && !approvedDates.has(dt)) {
-          scheduleOnlyUsed += getLeaveCost(shiftCode);
+        if (sId === stf.id) {
+          scheduleLeaveByDate[dt] = getLeaveCost(shiftCode);
         }
       });
 
-      const usedByRecords = Number((approvedReqUsed + scheduleOnlyUsed).toFixed(1));
-      const remaining =
-        stf.annualLeave !== undefined && stf.annualLeave !== null && usedByRecords === 0
-          ? Number(stf.annualLeave)
-          : Math.max(0, Number((granted - usedByRecords).toFixed(1)));
+      // 승인된 휴가 신청의 연차/반차 비용 수집
+      const approvedLeaveByDate = {};
+      leaveRequests
+        .filter((r) => r.staffId === stf.id && r.status === '승인')
+        .forEach((r) => {
+          const cost = r.cost !== undefined ? Number(r.cost) : getLeaveCost(r.type);
+          if (cost > 0 && r.date) {
+            approvedLeaveByDate[r.date] = Math.max(approvedLeaveByDate[r.date] || 0, cost);
+          }
+        });
 
-      const used =
-        usedByRecords > 0
-          ? usedByRecords
-          : Math.max(0, Number((granted - remaining).toFixed(1)));
+      const allUsedDates = new Set([
+        ...Object.keys(scheduleLeaveByDate),
+        ...Object.keys(approvedLeaveByDate)
+      ]);
+
+      let used = 0;
+      allUsedDates.forEach((dt) => {
+        used += Math.max(scheduleLeaveByDate[dt] || 0, approvedLeaveByDate[dt] || 0);
+      });
+      used = Number(used.toFixed(1));
+
+      // 부여 연차 결정: 명시적 grantedLeave > 입사일 자동계산 > (annualLeave + used) 보완값
+      let granted;
+      if (stf.grantedLeave !== undefined && stf.grantedLeave !== null && stf.grantedLeave !== '') {
+        granted = Number(stf.grantedLeave) || 0;
+      } else if (calc) {
+        granted = calc.earned;
+      } else {
+        granted = Number((Number(stf.annualLeave ?? 0) + used).toFixed(1));
+      }
+
+      const remaining = Math.max(0, Number((granted - used).toFixed(1)));
 
       map[stf.id] = {
         granted,
@@ -358,10 +369,6 @@ export default function App() {
     };
   };
 
-  const isStoreMonthApproved = (storeId) => {
-    return getStoreApprovalInfo(storeId).status === 'APPROVED';
-  };
-
   const isStoreMonthPending = (storeId) => {
     return getStoreApprovalInfo(storeId).status === 'PENDING';
   };
@@ -397,11 +404,44 @@ export default function App() {
     }
 
     const key = dateStr + '_' + staff.id;
+    const prevShift = schedules[key] || '';
     const updated = { ...schedules };
     if (!shiftCode) delete updated[key];
     else updated[key] = shiftCode;
+
+    // 스케줄에 연차/반차를 넣거나 뺄 때 직원 annualLeave 필드도 동기화 저장
+    const prevCost = getLeaveCost(prevShift);
+    const nextCost = getLeaveCost(shiftCode);
+    const diffCost = nextCost - prevCost;
+    let updatedStaffList = staffList;
+    if (diffCost !== 0) {
+      const currentSummary = leaveSummaryByStaff[staff.id];
+      const baseGranted =
+        currentSummary !== undefined
+          ? currentSummary.granted
+          : Number((Number(staff.annualLeave ?? 0) + prevCost).toFixed(1));
+      const baseUsed = currentSummary !== undefined ? currentSummary.used : prevCost;
+      const nextUsed = Math.max(0, Number((baseUsed + diffCost).toFixed(1)));
+      const nextRemaining = Math.max(0, Number((baseGranted - nextUsed).toFixed(1)));
+
+      updatedStaffList = staffList.map((s) =>
+        s.id === staff.id
+          ? {
+              ...s,
+              grantedLeave: baseGranted,
+              annualLeave: nextRemaining
+            }
+          : s
+      );
+      setStaffList(updatedStaffList);
+    }
+
     setSchedules(updated);
-    saveToCloud({ schedules: updated });
+    saveToCloud(
+      diffCost !== 0
+        ? { schedules: updated, staffList: updatedStaffList }
+        : { schedules: updated }
+    );
   };
 
   const handleRequestScheduleApproval = (storeId) => {
@@ -560,7 +600,7 @@ export default function App() {
     setLeaveRequests(updated);
     saveToCloud({ leaveRequests: updated });
     setLeaveReason('');
-    alert('휴가 신청이 접수되었습니다. 관리자 승인 시 연차 차감 및 스케줄에 반영됩니다.');
+    alert('휴가 신청이 접수되었습니다. 관리자 승인 시 잔여 연차 차감 및 스케줄에 반영됩니다.');
   };
 
   const handleLeaveAction = (req, newStatus) => {
@@ -1853,7 +1893,7 @@ export default function App() {
               <div className="mb-3">
                 <h2 className="font-bold text-base">매장 / 인원별 연차 · 월차 현황</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  연초/입사기준 부여 연차(1년 미만 만근 월차 포함), 사용 연차, 남은 연차를 한눈에 확인할 수 있습니다.
+                  스케줄표에 입력된 연차(1일)/반차(0.5일) 및 승인된 휴가 내역이 사용 연차와 남은 연차에 실시간 반영됩니다.
                 </p>
               </div>
               <div className="overflow-x-auto">
