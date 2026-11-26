@@ -3,7 +3,7 @@ import {
   Calendar as CalendarIcon, Users, Store, TrendingUp, Clock, Lock, Unlock,
   LogOut, Plus, Trash2, CheckCircle2, XCircle, Edit3, KeyRound, ChevronLeft,
   ChevronRight, AlertCircle, ShieldCheck, UserCheck, FileSpreadsheet,
-  Download, ShieldAlert, Send, RotateCcw
+  Download, ShieldAlert, Send, RotateCcw, BarChart3, UserX
 } from 'lucide-react';
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
@@ -35,14 +35,15 @@ const DEFAULT_STORES = [
 ];
 
 const DEFAULT_STAFF = [
-  { id: 'staff_1', name: '김민지', storeId: 'store_1', role: '매니저', pin: '1111', annualLeave: 15 },
-  { id: 'staff_2', name: '이서연', storeId: 'store_1', role: '시니어', pin: '2222', annualLeave: 15 },
-  { id: 'staff_3', name: '박지훈', storeId: 'store_2', role: '매니저', pin: '3333', annualLeave: 15 },
-  { id: 'staff_4', name: '최수빈', storeId: 'store_3', role: '매니저', pin: '4444', annualLeave: 15 },
-  { id: 'staff_5', name: '정현우', storeId: 'store_4', role: '사원', pin: '5555', annualLeave: 12 }
+  { id: 'staff_1', name: '김민지', storeId: 'store_1', role: '매니저', pin: '1111', annualLeave: 15, hireDate: '2023-03-01', status: 'ACTIVE' },
+  { id: 'staff_2', name: '이서연', storeId: 'store_1', role: '시니어', pin: '2222', annualLeave: 15, hireDate: '2024-01-10', status: 'ACTIVE' },
+  { id: 'staff_3', name: '박지훈', storeId: 'store_2', role: '매니저', pin: '3333', annualLeave: 15, hireDate: '2022-07-01', status: 'ACTIVE' },
+  { id: 'staff_4', name: '최수빈', storeId: 'store_3', role: '매니저', pin: '4444', annualLeave: 15, hireDate: '2023-11-15', status: 'ACTIVE' },
+  { id: 'staff_5', name: '정현우', storeId: 'store_4', role: '사원', pin: '5555', annualLeave: 12, hireDate: '2026-04-01', status: 'ACTIVE' }
 ];
 
 const WORK_GROUPS = ['A조', 'B조', 'C조', 'F조'];
+const ROLE_OPTIONS = ['매니저', '시니어', '사원', '아르바이트'];
 
 const SHIFT_TYPES = [
   { code: 'A조', label: 'A조 근무', color: 'bg-sky-100 text-sky-800 border-sky-200', isWork: true },
@@ -68,6 +69,54 @@ const formatUsd = (val) => {
 const formatQty = (val) => {
   const num = Number(val) || 0;
   return Number.isInteger(num) ? num.toLocaleString() : num.toFixed(1);
+};
+
+const formatDays = (val) => {
+  const num = Number(val) || 0;
+  return Number.isInteger(num) ? String(num) : num.toFixed(1);
+};
+
+/**
+ * 입사년월일 기준 연차/월차 자동 산출:
+ * - 입사 1년 미만: 입사일 이후 경과된 만근 개월 수만큼 월차(1개월당 1일, 최대 11일) 자동 산출
+ * - 입사 1년 이상: 근속연수 기준 연차(1년차 15일, 이후 2년마다 1일 가산 최대 25일)
+ */
+const calculateEarnedLeaveByHireDate = (hireDateStr, referenceDate = new Date()) => {
+  if (!hireDateStr) return null;
+  const parts = String(hireDateStr).split('-').map(Number);
+  if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) return null;
+  const hire = new Date(parts[0], parts[1] - 1, parts[2]);
+  if (Number.isNaN(hire.getTime())) return null;
+
+  const ref = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate());
+  if (ref < hire) return { earned: 0, monthsWorked: 0, yearsWorked: 0, mode: 'UNDER_1Y' };
+
+  let fullMonths = (ref.getFullYear() - hire.getFullYear()) * 12 + (ref.getMonth() - hire.getMonth());
+  if (ref.getDate() < hire.getDate()) {
+    fullMonths -= 1;
+  }
+  fullMonths = Math.max(0, fullMonths);
+
+  if (fullMonths < 12) {
+    const monthlyLeave = Math.min(11, fullMonths);
+    return {
+      earned: monthlyLeave,
+      monthsWorked: fullMonths,
+      yearsWorked: 0,
+      mode: 'UNDER_1Y'
+    };
+  }
+
+  const yearsWorked = Math.floor(fullMonths / 12);
+  const extraDays = Math.min(10, Math.max(0, Math.floor((yearsWorked - 1) / 2)));
+  const annualDays = Math.min(25, 15 + extraDays);
+
+  return {
+    earned: annualDays,
+    monthsWorked: fullMonths,
+    yearsWorked,
+    mode: 'OVER_1Y'
+  };
 };
 
 export default function App() {
@@ -180,6 +229,65 @@ export default function App() {
     });
   }, [year, month]);
 
+  const activeStaffList = useMemo(
+    () => staffList.filter((s) => s.status !== 'RESIGNED'),
+    [staffList]
+  );
+
+  // 직원별 연초 부여연차 / 사용연차 / 남은연차 계산
+  const leaveSummaryByStaff = useMemo(() => {
+    const map = {};
+    staffList.forEach((stf) => {
+      const calc = calculateEarnedLeaveByHireDate(stf.hireDate);
+      const granted =
+        stf.grantedLeave !== undefined && stf.grantedLeave !== null
+          ? Number(stf.grantedLeave)
+          : calc
+          ? calc.earned
+          : Number(stf.annualLeave ?? 0);
+
+      // 승인된 휴가 신청의 연차/반차 합산
+      const approvedReqUsed = leaveRequests
+        .filter((r) => r.staffId === stf.id && r.status === '승인')
+        .reduce((acc, r) => acc + (r.cost !== undefined ? Number(r.cost) : getLeaveCost(r.type)), 0);
+
+      // 스케줄표에 직접 입력된 연차/반차 중 승인요청과 중복되지 않는 건 보완
+      const approvedDates = new Set(
+        leaveRequests.filter((r) => r.staffId === stf.id && r.status === '승인').map((r) => r.date)
+      );
+      let scheduleOnlyUsed = 0;
+      Object.entries(schedules).forEach(([key, shiftCode]) => {
+        if (shiftCode !== '연차' && shiftCode !== '반차') return;
+        const idx = key.lastIndexOf('_');
+        if (idx === -1) return;
+        const dt = key.slice(0, idx);
+        const sId = key.slice(idx + 1);
+        if (sId === stf.id && !approvedDates.has(dt)) {
+          scheduleOnlyUsed += getLeaveCost(shiftCode);
+        }
+      });
+
+      const usedByRecords = Number((approvedReqUsed + scheduleOnlyUsed).toFixed(1));
+      const remaining =
+        stf.annualLeave !== undefined && stf.annualLeave !== null && usedByRecords === 0
+          ? Number(stf.annualLeave)
+          : Math.max(0, Number((granted - usedByRecords).toFixed(1)));
+
+      const used =
+        usedByRecords > 0
+          ? usedByRecords
+          : Math.max(0, Number((granted - remaining).toFixed(1)));
+
+      map[stf.id] = {
+        granted,
+        used,
+        remaining,
+        calcInfo: calc
+      };
+    });
+    return map;
+  }, [staffList, leaveRequests, schedules]);
+
   const handleLogin = (e) => {
     e.preventDefault();
     setLoginError('');
@@ -216,6 +324,10 @@ export default function App() {
       const target = staffList.find((s) => s.id === selectedStaffId);
       if (!target) {
         setLoginError('직원 정보를 찾을 수 없습니다.');
+        return;
+      }
+      if (target.status === 'RESIGNED') {
+        setLoginError('퇴사 처리된 계정으로 접속이 정지되었습니다.');
         return;
       }
       if (pinInput === target.pin) {
@@ -258,6 +370,7 @@ export default function App() {
   };
 
   const canEditScheduleForStaff = (staff) => {
+    if (staff.status === 'RESIGNED') return false;
     if (isAdmin) return true;
     if (!isManager || staff.storeId !== activeStaffProfile?.storeId) return false;
     const st = getStoreApprovalInfo(staff.storeId).status;
@@ -265,6 +378,10 @@ export default function App() {
   };
 
   const handleScheduleChange = (dateStr, staff, shiftCode) => {
+    if (staff.status === 'RESIGNED') {
+      alert('퇴사 처리된 직원의 스케줄은 수정할 수 없습니다.');
+      return;
+    }
     if (isAdmin) {
       // 관리자는 항상 수정 가능
     } else if (!isManager || staff.storeId !== activeStaffProfile?.storeId) {
@@ -339,8 +456,9 @@ export default function App() {
     const headers = ['매장명', '성명', '직책', '잔여연차', ...daysInMonth.map((d) => d.day + '일(' + d.dayName + ')')];
     const rows = targetStaff.map((stf) => {
       const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
+      const rem = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
       const dayCells = daysInMonth.map((d) => schedules[d.dateStr + '_' + stf.id] || '');
-      return [stName, stf.name, stf.role, stf.annualLeave ?? 0, ...dayCells];
+      return [stName, stf.name, stf.role, rem, ...dayCells];
     });
 
     const escapeCsv = (val) => '"' + String(val ?? '').replace(/"/g, '""') + '"';
@@ -415,7 +533,7 @@ export default function App() {
     e.preventDefault();
     if (!activeStaffProfile || !leaveDate) return;
     const cost = getLeaveCost(leaveType);
-    const currentRemain = Number(activeStaffProfile.annualLeave ?? 0);
+    const currentRemain = Number(leaveSummaryByStaff[activeStaffProfile.id]?.remaining ?? activeStaffProfile.annualLeave ?? 0);
     if (cost > 0 && currentRemain < cost) {
       alert('잔여 연차가 부족합니다. (현재 잔여 연차: ' + currentRemain + '일)');
       return;
@@ -457,7 +575,9 @@ export default function App() {
       if (cost > 0) {
         updatedStaff = updatedStaff.map((s) => {
           if (s.id !== req.staffId) return s;
-          const nextLeave = Math.max(0, Number((Number(s.annualLeave ?? 0) - cost).toFixed(1)));
+          const summary = leaveSummaryByStaff[s.id];
+          const baseRemain = summary ? summary.remaining : Number(s.annualLeave ?? 0);
+          const nextLeave = Math.max(0, Number((baseRemain - cost).toFixed(1)));
           return { ...s, annualLeave: nextLeave };
         });
       }
@@ -530,8 +650,17 @@ export default function App() {
   const [newStaffName, setNewStaffName] = useState('');
   const [newStaffStore, setNewStaffStore] = useState(stores[0]?.id || 'store_1');
   const [newStaffRole, setNewStaffRole] = useState('사원');
+  const [newStaffHireDate, setNewStaffHireDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [newStaffPin, setNewStaffPin] = useState('1234');
-  const [newStaffAnnualLeave, setNewStaffAnnualLeave] = useState('15');
+  const [newStaffAnnualLeave, setNewStaffAnnualLeave] = useState('');
+
+  const handleHireDateInputChange = (val) => {
+    setNewStaffHireDate(val);
+    const calc = calculateEarnedLeaveByHireDate(val);
+    if (calc) {
+      setNewStaffAnnualLeave(String(calc.earned));
+    }
+  };
 
   const handleAddStaff = (e) => {
     e.preventDefault();
@@ -539,33 +668,131 @@ export default function App() {
       alert('성명과 4자리 PIN을 확인해 주세요.');
       return;
     }
-    const leaveDays = Math.max(0, Number(newStaffAnnualLeave) || 0);
+    const calc = calculateEarnedLeaveByHireDate(newStaffHireDate);
+    const leaveDays =
+      newStaffAnnualLeave !== ''
+        ? Math.max(0, Number(newStaffAnnualLeave) || 0)
+        : calc
+        ? calc.earned
+        : 15;
+
     const added = {
       id: 'staff_' + Date.now(),
       name: newStaffName.trim(),
       storeId: newStaffStore,
       role: newStaffRole,
+      hireDate: newStaffHireDate || '',
       pin: newStaffPin,
-      annualLeave: leaveDays
+      grantedLeave: leaveDays,
+      annualLeave: leaveDays,
+      status: 'ACTIVE'
     };
     const updated = [...staffList, added];
     setStaffList(updated);
     saveToCloud({ staffList: updated });
     setNewStaffName('');
     setNewStaffPin('1234');
-    setNewStaffAnnualLeave('15');
+    setNewStaffAnnualLeave('');
   };
 
-  const handleUpdateStaffLeaveDays = (staffId, nextVal) => {
-    const parsed = Math.max(0, Number(nextVal) || 0);
-    const updated = staffList.map((s) => (s.id === staffId ? { ...s, annualLeave: parsed } : s));
+  const handleUpdateStaffRole = (staffId, nextRole) => {
+    const updated = staffList.map((s) => (s.id === staffId ? { ...s, role: nextRole } : s));
     setStaffList(updated);
     saveToCloud({ staffList: updated });
   };
 
-  const handleDeleteStaff = (id, name) => {
-    if (!window.confirm(name + ' 직원을 삭제하시겠습니까?')) return;
-    const updated = staffList.filter((s) => s.id !== id);
+  const handleUpdateStaffHireDate = (staffId, nextHireDate) => {
+    const calc = calculateEarnedLeaveByHireDate(nextHireDate);
+    const updated = staffList.map((s) => {
+      if (s.id !== staffId) return s;
+      const nextGranted = calc ? calc.earned : s.grantedLeave ?? s.annualLeave ?? 0;
+      const used = leaveSummaryByStaff[staffId]?.used ?? 0;
+      const nextRemain = Math.max(0, Number((nextGranted - used).toFixed(1)));
+      return {
+        ...s,
+        hireDate: nextHireDate,
+        grantedLeave: nextGranted,
+        annualLeave: nextRemain
+      };
+    });
+    setStaffList(updated);
+    saveToCloud({ staffList: updated });
+  };
+
+  const handleApplyAutoLeaveByHireDate = (staffId) => {
+    const target = staffList.find((s) => s.id === staffId);
+    if (!target) return;
+    if (!target.hireDate) {
+      alert('먼저 입사년월일을 입력해 주세요.');
+      return;
+    }
+    const calc = calculateEarnedLeaveByHireDate(target.hireDate);
+    if (!calc) {
+      alert('올바른 입사년월일 형식이 아닙니다.');
+      return;
+    }
+    const used = leaveSummaryByStaff[staffId]?.used ?? 0;
+    const nextRemain = Math.max(0, Number((calc.earned - used).toFixed(1)));
+    const updated = staffList.map((s) =>
+      s.id === staffId
+        ? { ...s, grantedLeave: calc.earned, annualLeave: nextRemain }
+        : s
+    );
+    setStaffList(updated);
+    saveToCloud({ staffList: updated });
+    alert(
+      target.name +
+        ' 님의 자동 산출 연차/월차가 적용되었습니다.\n(' +
+        (calc.mode === 'UNDER_1Y'
+          ? '1년 미만 만근 ' + calc.monthsWorked + '개월 → 월차 ' + calc.earned + '일'
+          : '근속 ' + calc.yearsWorked + '년 → 연차 ' + calc.earned + '일') +
+        ', 사용 ' +
+        used +
+        '일, 잔여 ' +
+        nextRemain +
+        '일)'
+    );
+  };
+
+  const handleUpdateStaffLeaveDays = (staffId, nextVal) => {
+    const parsed = Math.max(0, Number(nextVal) || 0);
+    const updated = staffList.map((s) => {
+      if (s.id !== staffId) return s;
+      const used = leaveSummaryByStaff[staffId]?.used ?? 0;
+      return {
+        ...s,
+        grantedLeave: parsed,
+        annualLeave: Math.max(0, Number((parsed - used).toFixed(1)))
+      };
+    });
+    setStaffList(updated);
+    saveToCloud({ staffList: updated });
+  };
+
+  const handleResignStaff = (id, name) => {
+    if (
+      !window.confirm(
+        name +
+          ' 직원을 퇴사 처리하시겠습니까?\n계정이 정지되어 로그인이 차단되며, 퇴사 이전의 스케줄·매출·휴가 기록은 그대로 보존됩니다.'
+      )
+    ) {
+      return;
+    }
+    const updated = staffList.map((s) =>
+      s.id === id ? { ...s, status: 'RESIGNED', resignedAt: new Date().toISOString().slice(0, 10) } : s
+    );
+    setStaffList(updated);
+    saveToCloud({ staffList: updated });
+  };
+
+  const handleReinstateStaff = (id, name) => {
+    if (!window.confirm(name + ' 직원의 퇴사 처리를 해제하고 계정을 다시 활성화하시겠습니까?')) return;
+    const updated = staffList.map((s) => {
+      if (s.id !== id) return s;
+      const copy = { ...s, status: 'ACTIVE' };
+      delete copy.resignedAt;
+      return copy;
+    });
     setStaffList(updated);
     saveToCloud({ staffList: updated });
   };
@@ -688,6 +915,9 @@ export default function App() {
 
     return Object.values(statsByStaff)
       .filter((item) => {
+        // 기존 매출 데이터가 있는 퇴사자도 기록 보존을 위해 포함하되, 실적 0인 퇴사자는 제외
+        const hasAnyActivity = item.workDaysCount > 0 || item.totalAllocatedRounded > 0;
+        if (item.staff.status === 'RESIGNED' && !hasAnyActivity) return false;
         if (isAdmin) {
           return selectedStoreId === 'ALL' || item.staff.storeId === selectedStoreId;
         }
@@ -714,11 +944,53 @@ export default function App() {
 
   const visibleStaff = useMemo(() => {
     if (currentUser?.role === 'staff' && activeStaffProfile) {
-      return staffList.filter((s) => s.storeId === activeStaffProfile.storeId);
+      return staffList.filter((s) => s.storeId === activeStaffProfile.storeId && s.status !== 'RESIGNED');
     }
-    if (selectedStoreId === 'ALL') return staffList;
-    return staffList.filter((s) => s.storeId === selectedStoreId);
-  }, [currentUser, activeStaffProfile, selectedStoreId, staffList]);
+    if (selectedStoreId === 'ALL') return activeStaffList;
+    return activeStaffList.filter((s) => s.storeId === selectedStoreId);
+  }, [currentUser, activeStaffProfile, selectedStoreId, staffList, activeStaffList]);
+
+  // 스케줄표 하단 일자별 조별 근무 인원 집계
+  const dailyGroupCounts = useMemo(() => {
+    const result = {};
+    daysInMonth.forEach((d) => {
+      const counts = { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0, total: 0 };
+      visibleStaff.forEach((stf) => {
+        const shift = schedules[d.dateStr + '_' + stf.id];
+        if (WORK_GROUPS.includes(shift)) {
+          counts[shift] += 1;
+          counts.total += 1;
+        }
+      });
+      result[d.dateStr] = counts;
+    });
+    return result;
+  }, [daysInMonth, visibleStaff, schedules]);
+
+  // 휴가·연차관리 탭용 매장/인원별 연차 요약 목록
+  const leaveOverviewRows = useMemo(() => {
+    return staffList
+      .filter((stf) => {
+        if (isAdmin) {
+          return selectedStoreId === 'ALL' || stf.storeId === selectedStoreId;
+        }
+        return stf.storeId === activeStaffProfile?.storeId;
+      })
+      .map((stf) => {
+        const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
+        const summary = leaveSummaryByStaff[stf.id] || {
+          granted: Number(stf.annualLeave ?? 0),
+          used: 0,
+          remaining: Number(stf.annualLeave ?? 0),
+          calcInfo: null
+        };
+        return {
+          staff: stf,
+          storeName: stName,
+          ...summary
+        };
+      });
+  }, [staffList, stores, isAdmin, selectedStoreId, activeStaffProfile, leaveSummaryByStaff]);
 
   if (!currentUser) {
     return (
@@ -765,7 +1037,7 @@ export default function App() {
                 >
                   <option value="">-- 본인의 이름을 선택하세요 --</option>
                   {stores.map((st) => {
-                    const members = staffList.filter((m) => m.storeId === st.id);
+                    const members = activeStaffList.filter((m) => m.storeId === st.id);
                     if (members.length === 0) return null;
                     return (
                       <optgroup key={st.id} label={st.name}>
@@ -839,6 +1111,7 @@ export default function App() {
   const currentStoreApproved = currentStoreStatus === 'APPROVED';
   const currentStorePending = currentStoreStatus === 'PENDING';
   const currentStoreRejected = currentStoreStatus === 'REJECTED';
+  const activeRemainLeave = leaveSummaryByStaff[activeStaffProfile?.id]?.remaining ?? activeStaffProfile?.annualLeave ?? 0;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-20">
@@ -856,7 +1129,7 @@ export default function App() {
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-indigo-300 border border-slate-700">
                   {isAdmin
                     ? 'ADMIN'
-                    : activeStaffProfile?.name + ' (' + activeStaffProfile?.role + ' · 잔여연차 ' + (activeStaffProfile?.annualLeave ?? 0) + '일)'}
+                    : activeStaffProfile?.name + ' (' + activeStaffProfile?.role + ' · 잔여연차 ' + formatDays(activeRemainLeave) + '일)'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 flex items-center gap-1">
@@ -889,7 +1162,15 @@ export default function App() {
               ? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
               : 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
           >
-            <TrendingUp className="w-4 h-4" />일매출(USD) · 수량집계
+            <TrendingUp className="w-4 h-4" />일매출(USD) · 수량입력
+          </button>
+          <button
+            onClick={() => setActiveTab('staff_sales')}
+            className={activeTab === 'staff_sales'
+              ? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+              : 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+          >
+            <BarChart3 className="w-4 h-4" />사원별 배분집계
           </button>
           <button
             onClick={() => setActiveTab('leave')}
@@ -1058,17 +1339,17 @@ export default function App() {
               <table className="w-full border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-100 border-b border-slate-200">
-                    <th className="sticky left-0 z-20 bg-slate-100 px-3 py-2.5 text-left font-bold text-slate-700 min-w-[140px] border-r border-slate-200">
+                    <th className="sticky left-0 z-20 bg-slate-100 px-3 py-2.5 text-left font-bold text-slate-700 min-w-[145px] border-r border-slate-200">
                       매장 / 성명
                     </th>
                     {daysInMonth.map((d) => (
                       <th
                         key={d.dateStr}
                         className={d.dayOfWeek === 0
-                          ? 'px-1.5 py-2 text-center min-w-[54px] border-r border-slate-200 text-rose-600 bg-rose-50/60'
+                          ? 'px-1.5 py-2 text-center min-w-[58px] border-r border-slate-200 text-rose-600 bg-rose-50/60'
                           : d.dayOfWeek === 6
-                          ? 'px-1.5 py-2 text-center min-w-[54px] border-r border-slate-200 text-blue-600 bg-blue-50/60'
-                          : 'px-1.5 py-2 text-center min-w-[54px] border-r border-slate-200 text-slate-700'}
+                          ? 'px-1.5 py-2 text-center min-w-[58px] border-r border-slate-200 text-blue-600 bg-blue-50/60'
+                          : 'px-1.5 py-2 text-center min-w-[58px] border-r border-slate-200 text-slate-700'}
                       >
                         <div className="font-bold">{d.day}</div>
                         <div className="text-[10px] font-normal">{d.dayName}</div>
@@ -1081,6 +1362,7 @@ export default function App() {
                     const stObj = stores.find((s) => s.id === staff.storeId);
                     const rowEditable = canEditScheduleForStaff(staff);
                     const rowApproval = getStoreApprovalInfo(staff.storeId);
+                    const remLeave = leaveSummaryByStaff[staff.id]?.remaining ?? staff.annualLeave ?? 0;
                     return (
                       <tr key={staff.id} className="border-b border-slate-100 hover:bg-slate-50/70">
                         <td className="sticky left-0 z-10 bg-white px-3 py-2 border-r border-slate-200">
@@ -1088,8 +1370,8 @@ export default function App() {
                             <span>{staff.name}</span>
                             <span className="text-[10px] text-slate-500 font-normal">({staff.role})</span>
                           </div>
-                          <div className="text-[10px] text-slate-400 truncate max-w-[125px]">
-                            {stObj?.name} · 연차 {staff.annualLeave ?? 0}일
+                          <div className="text-[10px] text-slate-400 truncate max-w-[130px]">
+                            {stObj?.name} · 연차 {formatDays(remLeave)}일
                           </div>
                         </td>
                         {daysInMonth.map((d) => {
@@ -1126,6 +1408,29 @@ export default function App() {
                       </tr>
                     );
                   })}
+
+                  {/* 제일 하단: 일자별 조별 근무 인원 요약 */}
+                  <tr className="bg-indigo-50/70 border-t-2 border-indigo-200 font-semibold">
+                    <td className="sticky left-0 z-10 bg-indigo-50 px-3 py-2 border-r border-indigo-200 text-indigo-950">
+                      <div className="font-bold text-xs">일별 조별 출근인원</div>
+                      <div className="text-[10px] text-indigo-700 font-normal">
+                        {isAdmin && selectedStoreId === 'ALL' ? '전체 매장 합계' : '선택 매장 합계'} (A/B/C/F · 계)
+                      </div>
+                    </td>
+                    {daysInMonth.map((d) => {
+                      const c = dailyGroupCounts[d.dateStr] || { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0, total: 0 };
+                      return (
+                        <td key={d.dateStr} className="px-1 py-1.5 text-center border-r border-indigo-100 leading-tight">
+                          <div className="text-[10px] text-slate-700">
+                            {c['A조']}/{c['B조']}/{c['C조']}/{c['F조']}
+                          </div>
+                          <div className="text-[11px] font-bold text-indigo-800 mt-0.5">
+                            계 {c.total}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
                 </tbody>
               </table>
             </div>
@@ -1133,305 +1438,360 @@ export default function App() {
         )}
 
         {activeTab === 'sales' && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm h-fit">
-                <h2 className="font-bold text-base mb-1 flex items-center gap-1.5">
-                  <FileSpreadsheet className="w-4 h-4 text-indigo-600" />일매출(USD) · 수량 마감 등록
-                </h2>
-                <p className="text-xs text-slate-500 mb-4">
-                  1 USD 단위 금액과 판매 수량(PCS)을 등록하면 매장 목표와 사원별 배분 집계에 실시간 반영됩니다.
-                </p>
-                <form onSubmit={handleSaveSales} className="space-y-3.5">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">매출 일자</label>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm h-fit">
+              <h2 className="font-bold text-base mb-1 flex items-center gap-1.5">
+                <FileSpreadsheet className="w-4 h-4 text-indigo-600" />일매출(USD) · 수량 마감 등록
+              </h2>
+              <p className="text-xs text-slate-500 mb-4">
+                1 USD 단위 금액과 판매 수량(PCS)을 등록하면 매장 목표와 [사원별 배분집계] 탭에 실시간 반영됩니다.
+              </p>
+              <form onSubmit={handleSaveSales} className="space-y-3.5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">매출 일자</label>
+                  <input
+                    type="date"
+                    value={salesDate}
+                    onChange={(e) => setSalesDate(e.target.value)}
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">대상 매장</label>
+                  {isAdmin ? (
+                    <select
+                      value={salesStoreInput}
+                      onChange={(e) => setSalesStoreInput(e.target.value)}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
+                    >
+                      {stores.map((st) => (<option key={st.id} value={st.id}>{st.name}</option>))}
+                    </select>
+                  ) : (
                     <input
-                      type="date"
-                      value={salesDate}
-                      onChange={(e) => setSalesDate(e.target.value)}
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                      type="text"
+                      readOnly
+                      value={myStoreObj?.name || ''}
+                      className="w-full border border-slate-200 bg-slate-100 rounded-lg px-3 py-2 text-sm text-slate-600"
+                    />
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">일매출 금액 (USD)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={salesAmountInput}
+                      onChange={(e) => setSalesAmountInput(e.target.value)}
+                      placeholder="예: 3450"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold"
                       required
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">대상 매장</label>
-                    {isAdmin ? (
-                      <select
-                        value={salesStoreInput}
-                        onChange={(e) => setSalesStoreInput(e.target.value)}
-                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
-                      >
-                        {stores.map((st) => (<option key={st.id} value={st.id}>{st.name}</option>))}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        readOnly
-                        value={myStoreObj?.name || ''}
-                        className="w-full border border-slate-200 bg-slate-100 rounded-lg px-3 py-2 text-sm text-slate-600"
-                      />
-                    )}
-                  </div>
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1">일매출 금액 (USD)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={salesAmountInput}
-                        onChange={(e) => setSalesAmountInput(e.target.value)}
-                        placeholder="예: 3450"
-                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold"
-                        required
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1">판매 수량 (PCS)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={salesQuantityInput}
-                        onChange={(e) => setSalesQuantityInput(e.target.value)}
-                        placeholder="예: 24"
-                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold"
-                        required
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">특이사항 / 비고</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">판매 수량 (PCS)</label>
                     <input
-                      type="text"
-                      value={salesNoteInput}
-                      onChange={(e) => setSalesNoteInput(e.target.value)}
-                      placeholder="단체 관광객 입점, 프로모션 등"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={salesQuantityInput}
+                      onChange={(e) => setSalesQuantityInput(e.target.value)}
+                      placeholder="예: 24"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold"
+                      required
                     />
                   </div>
-                  <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">
-                    일매출(USD) · 수량 저장
-                  </button>
-                </form>
-              </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">특이사항 / 비고</label>
+                  <input
+                    type="text"
+                    value={salesNoteInput}
+                    onChange={(e) => setSalesNoteInput(e.target.value)}
+                    placeholder="단체 관광객 입점, 프로모션 등"
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">
+                  일매출(USD) · 수량 저장
+                </button>
+              </form>
+            </div>
 
-              <div className="lg:col-span-2 space-y-6">
-                <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                  <h3 className="font-bold text-base mb-4">{year}년 {month + 1}월 매장별 목표 대비 달성 현황 (USD)</h3>
-                  <div className="space-y-4">
-                    {stores
-                      .filter((st) => isAdmin || st.id === activeStaffProfile?.storeId)
-                      .map((st) => {
-                        const summary = monthlySalesSummary[st.id] || { amount: 0, quantity: 0 };
-                        const actual = summary.amount;
-                        const totalQty = summary.quantity;
-                        const rate = st.targetSales > 0 ? Math.round((actual / st.targetSales) * 100) : 0;
-                        return (
-                          <div key={st.id} className="border border-slate-100 rounded-lg p-3 bg-slate-50/60">
-                            <div className="flex justify-between items-center text-sm mb-1.5">
-                              <span className="font-bold text-slate-800">{st.name}</span>
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-semibold px-2 py-0.5 rounded bg-slate-200/80 text-slate-700">
-                                  누적 {totalQty.toLocaleString()} PCS
-                                </span>
-                                <span className="font-bold text-indigo-600">{rate}% 달성</span>
-                              </div>
-                            </div>
-                            <div className="w-full h-2.5 bg-slate-200 rounded-full overflow-hidden mb-1.5">
-                              <div className="h-full bg-indigo-600 rounded-full transition-all" style={{ width: Math.min(rate, 100) + '%' }} />
-                            </div>
-                            <div className="flex justify-between text-xs text-slate-500">
-                              <span>누적 매출: <strong className="text-slate-700">{formatUsd(actual)}</strong></span>
-                              <span>월 목표: {formatUsd(st.targetSales)}</span>
+            <div className="lg:col-span-2 space-y-6">
+              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+                <h3 className="font-bold text-base mb-4">{year}년 {month + 1}월 매장별 목표 대비 달성 현황 (USD)</h3>
+                <div className="space-y-4">
+                  {stores
+                    .filter((st) => isAdmin || st.id === activeStaffProfile?.storeId)
+                    .map((st) => {
+                      const summary = monthlySalesSummary[st.id] || { amount: 0, quantity: 0 };
+                      const actual = summary.amount;
+                      const totalQty = summary.quantity;
+                      const rate = st.targetSales > 0 ? Math.round((actual / st.targetSales) * 100) : 0;
+                      return (
+                        <div key={st.id} className="border border-slate-100 rounded-lg p-3 bg-slate-50/60">
+                          <div className="flex justify-between items-center text-sm mb-1.5">
+                            <span className="font-bold text-slate-800">{st.name}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-semibold px-2 py-0.5 rounded bg-slate-200/80 text-slate-700">
+                                누적 {totalQty.toLocaleString()} PCS
+                              </span>
+                              <span className="font-bold text-indigo-600">{rate}% 달성</span>
                             </div>
                           </div>
-                        );
-                      })}
-                  </div>
+                          <div className="w-full h-2.5 bg-slate-200 rounded-full overflow-hidden mb-1.5">
+                            <div className="h-full bg-indigo-600 rounded-full transition-all" style={{ width: Math.min(rate, 100) + '%' }} />
+                          </div>
+                          <div className="flex justify-between text-xs text-slate-500">
+                            <span>누적 매출: <strong className="text-slate-700">{formatUsd(actual)}</strong></span>
+                            <span>월 목표: {formatUsd(st.targetSales)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
                 </div>
+              </div>
 
-                <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                  <h3 className="font-bold text-base mb-3">당월 일매출 · 판매수량 입력 내역</h3>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs text-left">
-                      <thead>
-                        <tr className="border-b border-slate-200 text-slate-500">
-                          <th className="py-2">일자</th>
-                          <th className="py-2">매장명</th>
-                          <th className="py-2 text-right">매출액(USD)</th>
-                          <th className="py-2 text-right">수량(PCS)</th>
-                          <th className="py-2 pl-3">비고 / 작성자</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Object.entries(salesRecords)
-                          .filter(([key]) => {
-                            if (!key.startsWith(currentMonthPrefix)) return false;
-                            const parts = key.split('_');
-                            const stId = parts.slice(1).join('_');
-                            return isAdmin || stId === activeStaffProfile?.storeId;
-                          })
-                          .sort((a, b) => b[0].localeCompare(a[0]))
-                          .map(([key, rec]) => {
-                            const parts = key.split('_');
-                            const dt = parts[0];
-                            const stId = parts.slice(1).join('_');
-                            const stName = stores.find((s) => s.id === stId)?.name || stId;
-                            return (
-                              <tr key={key} className="border-b border-slate-100">
-                                <td className="py-2.5 font-medium">{dt}</td>
-                                <td className="py-2.5">{stName}</td>
-                                <td className="py-2.5 text-right font-bold text-slate-800">{formatUsd(rec.amount)}</td>
-                                <td className="py-2.5 text-right font-semibold text-indigo-700">{Number(rec.quantity || 0).toLocaleString()} PCS</td>
-                                <td className="py-2.5 pl-3 text-slate-500">{rec.note || '-'} ({rec.author})</td>
-                              </tr>
-                            );
-                          })}
-                      </tbody>
-                    </table>
-                  </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <h3 className="font-bold text-base">당월 일매출 · 판매수량 입력 내역</h3>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('staff_sales')}
+                    className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 underline"
+                  >
+                    사원별 출근 배분집계 탭으로 이동 →
+                  </button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs text-left">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500">
+                        <th className="py-2">일자</th>
+                        <th className="py-2">매장명</th>
+                        <th className="py-2 text-right">매출액(USD)</th>
+                        <th className="py-2 text-right">수량(PCS)</th>
+                        <th className="py-2 pl-3">비고 / 작성자</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(salesRecords)
+                        .filter(([key]) => {
+                          if (!key.startsWith(currentMonthPrefix)) return false;
+                          const parts = key.split('_');
+                          const stId = parts.slice(1).join('_');
+                          return isAdmin || stId === activeStaffProfile?.storeId;
+                        })
+                        .sort((a, b) => b[0].localeCompare(a[0]))
+                        .map(([key, rec]) => {
+                          const parts = key.split('_');
+                          const dt = parts[0];
+                          const stId = parts.slice(1).join('_');
+                          const stName = stores.find((s) => s.id === stId)?.name || stId;
+                          return (
+                            <tr key={key} className="border-b border-slate-100">
+                              <td className="py-2.5 font-medium">{dt}</td>
+                              <td className="py-2.5">{stName}</td>
+                              <td className="py-2.5 text-right font-bold text-slate-800">{formatUsd(rec.amount)}</td>
+                              <td className="py-2.5 text-right font-semibold text-indigo-700">{Number(rec.quantity || 0).toLocaleString()} PCS</td>
+                              <td className="py-2.5 pl-3 text-slate-500">{rec.note || '-'} ({rec.author})</td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
+          </div>
+        )}
 
+        {activeTab === 'staff_sales' && (
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+            <div className="mb-4">
+              <h2 className="font-bold text-base">
+                {year}년 {month + 1}월 판매사원별 출근 배분 매출(USD) · 수량 및 조별(A/B/C/F) 평균
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                해당 일자 매장에 A·B·C·F조로 출근한 모든 사원에게 당일 매장 전체 매출(USD)과 판매 수량(PCS)을 동일하게 부여하여 사원별 누적·평균 및 조별 평균 매출을 집계합니다.
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-100 border-b border-slate-200 text-slate-600">
+                    <th className="py-2.5 px-3">사원명 (직책)</th>
+                    <th className="py-2.5 px-3">소속 매장</th>
+                    <th className="py-2.5 px-3 text-center">출근일수</th>
+                    <th className="py-2.5 px-3 text-right">총 배분매출</th>
+                    <th className="py-2.5 px-3 text-right">총 배분수량</th>
+                    <th className="py-2.5 px-3 text-right">출근일 평균매출</th>
+                    <th className="py-2.5 px-3 text-right">일 평균수량</th>
+                    <th className="py-2.5 px-3 text-right">A조 평균</th>
+                    <th className="py-2.5 px-3 text-right">B조 평균</th>
+                    <th className="py-2.5 px-3 text-right">C조 평균</th>
+                    <th className="py-2.5 px-3 text-right">F조 평균</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {staffSalesAnalytics.map((row) => {
+                    const stName = stores.find((s) => s.id === row.staff.storeId)?.name || '미지정';
+                    return (
+                      <tr key={row.staff.id} className="border-b border-slate-100 hover:bg-slate-50/70">
+                        <td className="py-2.5 px-3 font-bold text-slate-800">
+                          {row.staff.name} <span className="font-normal text-slate-500">({row.staff.role})</span>
+                          {row.staff.status === 'RESIGNED' && (
+                            <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 font-semibold">퇴사</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-600">{stName}</td>
+                        <td className="py-2.5 px-3 text-center font-semibold">{row.workDaysCount}일</td>
+                        <td className="py-2.5 px-3 text-right font-bold text-indigo-700">
+                          {formatUsd(row.totalAllocatedRounded)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-semibold text-slate-700">
+                          {formatQty(row.totalAllocatedQtyRounded)} PCS
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-semibold text-slate-800">
+                          {formatUsd(row.overallAvg)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">
+                          {formatQty(row.overallAvgQty)} PCS
+                        </td>
+                        {WORK_GROUPS.map((g) => (
+                          <td key={g} className="py-2.5 px-3 text-right font-mono text-slate-700">
+                            {row.groupAverages[g] !== null ? formatUsd(row.groupAverages[g]) : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'leave' && (
+          <div className="space-y-6">
+            {/* 매장/인원별 연차 현황 한눈에 보기 */}
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
               <div className="mb-3">
-                <h3 className="font-bold text-base">
-                  {year}년 {month + 1}월 판매사원별 출근 배분 매출(USD) · 수량 및 조별(A/B/C/F) 평균
-                </h3>
-                <p className="text-xs text-slate-500">
-                  해당 일자 매장에 A·B·C·F조로 출근한 모든 사원에게 당일 매장 전체 매출(USD)과 판매 수량(PCS)을 동일하게 부여하여 사원별 누적·평균 및 조별 평균 매출을 집계합니다.
+                <h2 className="font-bold text-base">매장 / 인원별 연차 · 월차 현황</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  연초/입사기준 부여 연차(1년 미만 만근 월차 포함), 사용 연차, 남은 연차를 한눈에 확인할 수 있습니다.
                 </p>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-100 border-b border-slate-200 text-slate-600">
-                      <th className="py-2.5 px-3">사원명 (직책)</th>
-                      <th className="py-2.5 px-3">소속 매장</th>
-                      <th className="py-2.5 px-3 text-center">출근일수</th>
-                      <th className="py-2.5 px-3 text-right">총 배분매출</th>
-                      <th className="py-2.5 px-3 text-right">총 배분수량</th>
-                      <th className="py-2.5 px-3 text-right">출근일 평균매출</th>
-                      <th className="py-2.5 px-3 text-right">일 평균수량</th>
-                      <th className="py-2.5 px-3 text-right">A조 평균</th>
-                      <th className="py-2.5 px-3 text-right">B조 평균</th>
-                      <th className="py-2.5 px-3 text-right">C조 평균</th>
-                      <th className="py-2.5 px-3 text-right">F조 평균</th>
+                      <th className="py-2.5 px-3">매장</th>
+                      <th className="py-2.5 px-3">성명 (직책)</th>
+                      <th className="py-2.5 px-3 text-center">입사일</th>
+                      <th className="py-2.5 px-3 text-center">부여 연차</th>
+                      <th className="py-2.5 px-3 text-center">사용 연차</th>
+                      <th className="py-2.5 px-3 text-center">남은 연차</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {staffSalesAnalytics.map((row) => {
-                      const stName = stores.find((s) => s.id === row.staff.storeId)?.name || '미지정';
-                      return (
-                        <tr key={row.staff.id} className="border-b border-slate-100 hover:bg-slate-50/70">
-                          <td className="py-2.5 px-3 font-bold text-slate-800">
-                            {row.staff.name} <span className="font-normal text-slate-500">({row.staff.role})</span>
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-600">{stName}</td>
-                          <td className="py-2.5 px-3 text-center font-semibold">{row.workDaysCount}일</td>
-                          <td className="py-2.5 px-3 text-right font-bold text-indigo-700">
-                            {formatUsd(row.totalAllocatedRounded)}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-semibold text-slate-700">
-                            {formatQty(row.totalAllocatedQtyRounded)} PCS
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-semibold text-slate-800">
-                            {formatUsd(row.overallAvg)}
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-slate-600">
-                            {formatQty(row.overallAvgQty)} PCS
-                          </td>
-                          {WORK_GROUPS.map((g) => (
-                            <td key={g} className="py-2.5 px-3 text-right font-mono text-slate-700">
-                              {row.groupAverages[g] !== null ? formatUsd(row.groupAverages[g]) : '-'}
-                            </td>
-                          ))}
-                        </tr>
-                      );
-                    })}
+                    {leaveOverviewRows.map((row) => (
+                      <tr key={row.staff.id} className="border-b border-slate-100 hover:bg-slate-50/70">
+                        <td className="py-2.5 px-3 text-slate-600">{row.storeName}</td>
+                        <td className="py-2.5 px-3 font-bold text-slate-800">
+                          {row.staff.name} <span className="font-normal text-slate-500">({row.staff.role})</span>
+                          {row.staff.status === 'RESIGNED' && (
+                            <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 font-semibold">퇴사</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-center font-mono text-slate-600">{row.staff.hireDate || '-'}</td>
+                        <td className="py-2.5 px-3 text-center font-semibold text-slate-700">{formatDays(row.granted)}일</td>
+                        <td className="py-2.5 px-3 text-center font-semibold text-amber-700">{formatDays(row.used)}일</td>
+                        <td className="py-2.5 px-3 text-center font-bold text-indigo-700">{formatDays(row.remaining)}일</td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
             </div>
-          </div>
-        )}
 
-        {activeTab === 'leave' && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {!isAdmin && (
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm h-fit">
-                <h2 className="font-bold text-base mb-1">휴가 / 연차 신청</h2>
-                <p className="text-xs text-slate-500 mb-3">
-                  현재 잔여 연차: <span className="font-bold text-indigo-600">{activeStaffProfile?.annualLeave ?? 0}일</span>
-                </p>
-                <p className="text-xs text-slate-500 mb-4">
-                  관리자 승인 시 잔여 연차가 차감되고 월간 스케줄표에 자동 반영됩니다.
-                </p>
-                <form onSubmit={handleSubmitLeave} className="space-y-3.5">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">희망 일자</label>
-                    <input type="date" value={leaveDate} onChange={(e) => setLeaveDate(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" required />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">휴가 구분</label>
-                    <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">
-                      <option value="연차">연차휴가 (1일 차감)</option>
-                      <option value="반차">반차 (0.5일 차감)</option>
-                      <option value="휴무">정기휴무 요청 (차감 없음)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">사유</label>
-                    <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="개인 사유" className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
-                  </div>
-                  <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">
-                    신청서 제출
-                  </button>
-                </form>
-              </div>
-            )}
-
-            <div className={isAdmin ? 'lg:col-span-3 bg-white rounded-xl border border-slate-200 p-5 shadow-sm' : 'lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5 shadow-sm'}>
-              <h3 className="font-bold text-base mb-3">{isAdmin ? '전 매장 휴가 신청 및 연차 승인 관리' : '내 휴가 신청 내역'}</h3>
-              <div className="space-y-2.5">
-                {leaveRequests
-                  .filter((r) => isAdmin || r.staffId === activeStaffProfile?.id)
-                  .map((req) => (
-                    <div key={req.id} className="border border-slate-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-bold text-sm">{req.staffName}</span>
-                          <span className="text-xs text-slate-500">{req.storeName}</span>
-                          <span className="text-xs px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">
-                            {req.date} · {req.type} ({req.cost !== undefined ? req.cost : getLeaveCost(req.type)}일)
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-500 mt-1">사유: {req.reason}</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {req.status === '대기' && isAdmin ? (
-                          <>
-                            <button onClick={() => handleLeaveAction(req, '승인')} className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold">
-                              <CheckCircle2 className="w-3.5 h-3.5" />승인
-                            </button>
-                            <button onClick={() => handleLeaveAction(req, '반려')} className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold">
-                              <XCircle className="w-3.5 h-3.5" />반려
-                            </button>
-                          </>
-                        ) : (
-                          <span className={req.status === '승인'
-                            ? 'text-xs font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800'
-                            : req.status === '반려'
-                            ? 'text-xs font-bold px-2.5 py-1 rounded-full bg-rose-100 text-rose-800'
-                            : 'text-xs font-bold px-2.5 py-1 rounded-full bg-amber-100 text-amber-800'}>
-                            {req.status}
-                          </span>
-                        )}
-                      </div>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {!isAdmin && (
+                <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm h-fit">
+                  <h2 className="font-bold text-base mb-1">휴가 / 연차 신청</h2>
+                  <p className="text-xs text-slate-500 mb-3">
+                    현재 잔여 연차: <span className="font-bold text-indigo-600">{formatDays(activeRemainLeave)}일</span>
+                  </p>
+                  <p className="text-xs text-slate-500 mb-4">
+                    관리자 승인 시 잔여 연차가 차감되고 월간 스케줄표에 자동 반영됩니다.
+                  </p>
+                  <form onSubmit={handleSubmitLeave} className="space-y-3.5">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">희망 일자</label>
+                      <input type="date" value={leaveDate} onChange={(e) => setLeaveDate(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" required />
                     </div>
-                  ))}
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">휴가 구분</label>
+                      <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">
+                        <option value="연차">연차휴가 (1일 차감)</option>
+                        <option value="반차">반차 (0.5일 차감)</option>
+                        <option value="휴무">정기휴무 요청 (차감 없음)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">사유</label>
+                      <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="개인 사유" className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+                    </div>
+                    <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">
+                      신청서 제출
+                    </button>
+                  </form>
+                </div>
+              )}
+
+              <div className={isAdmin ? 'lg:col-span-3 bg-white rounded-xl border border-slate-200 p-5 shadow-sm' : 'lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5 shadow-sm'}>
+                <h3 className="font-bold text-base mb-3">{isAdmin ? '전 매장 휴가 신청 및 연차 승인 관리' : '내 휴가 신청 내역'}</h3>
+                <div className="space-y-2.5">
+                  {leaveRequests
+                    .filter((r) => isAdmin || r.staffId === activeStaffProfile?.id)
+                    .map((req) => (
+                      <div key={req.id} className="border border-slate-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-sm">{req.staffName}</span>
+                            <span className="text-xs text-slate-500">{req.storeName}</span>
+                            <span className="text-xs px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">
+                              {req.date} · {req.type} ({req.cost !== undefined ? req.cost : getLeaveCost(req.type)}일)
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-1">사유: {req.reason}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {req.status === '대기' && isAdmin ? (
+                            <>
+                              <button onClick={() => handleLeaveAction(req, '승인')} className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold">
+                                <CheckCircle2 className="w-3.5 h-3.5" />승인
+                              </button>
+                              <button onClick={() => handleLeaveAction(req, '반려')} className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold">
+                                <XCircle className="w-3.5 h-3.5" />반려
+                              </button>
+                            </>
+                          ) : (
+                            <span className={req.status === '승인'
+                              ? 'text-xs font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800'
+                              : req.status === '반려'
+                              ? 'text-xs font-bold px-2.5 py-1 rounded-full bg-rose-100 text-rose-800'
+                              : 'text-xs font-bold px-2.5 py-1 rounded-full bg-amber-100 text-amber-800'}>
+                              {req.status}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                </div>
               </div>
             </div>
           </div>
@@ -1514,73 +1874,138 @@ export default function App() {
                 </div>
 
                 <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                  <h2 className="font-bold text-base mb-3 flex items-center gap-1.5">
-                    <Users className="w-4 h-4 text-indigo-600" />판매사원 계정 · 부여 연차 · PIN 관리
+                  <h2 className="font-bold text-base mb-1 flex items-center gap-1.5">
+                    <Users className="w-4 h-4 text-indigo-600" />판매사원 계정 · 입사일 자동연차/월차 · 직책수정 · 퇴사처리
                   </h2>
-                  <form onSubmit={handleAddStaff} className="grid grid-cols-1 sm:grid-cols-6 gap-2.5 mb-5 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
-                    <input type="text" value={newStaffName} onChange={(e) => setNewStaffName(e.target.value)} placeholder="직원 성명" className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white" required />
-                    <select value={newStaffStore} onChange={(e) => setNewStaffStore(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">
+                  <p className="text-xs text-slate-500 mb-3">
+                    입사일을 입력하면 1년 미만 직원은 만근 개월 수 기준 월차, 1년 이상 직원은 근속 기준 연차가 자동 계산됩니다. 퇴사 처리 시 계정이 정지되며 기존 이력은 유지됩니다.
+                  </p>
+                  <form onSubmit={handleAddStaff} className="grid grid-cols-1 sm:grid-cols-7 gap-2 mb-5 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                    <input type="text" value={newStaffName} onChange={(e) => setNewStaffName(e.target.value)} placeholder="직원 성명" className="border border-slate-300 rounded-lg px-2.5 py-2 text-xs bg-white" required />
+                    <select value={newStaffStore} onChange={(e) => setNewStaffStore(e.target.value)} className="border border-slate-300 rounded-lg px-2.5 py-2 text-xs bg-white">
                       {stores.map((st) => (<option key={st.id} value={st.id}>{st.name}</option>))}
                     </select>
-                    <select value={newStaffRole} onChange={(e) => setNewStaffRole(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">
-                      <option value="매니저">매니저</option>
-                      <option value="시니어">시니어</option>
-                      <option value="사원">사원</option>
-                      <option value="아르바이트">아르바이트</option>
+                    <select value={newStaffRole} onChange={(e) => setNewStaffRole(e.target.value)} className="border border-slate-300 rounded-lg px-2.5 py-2 text-xs bg-white">
+                      {ROLE_OPTIONS.map((r) => (<option key={r} value={r}>{r}</option>))}
                     </select>
+                    <input
+                      type="date"
+                      value={newStaffHireDate}
+                      onChange={(e) => handleHireDateInputChange(e.target.value)}
+                      title="입사년월일"
+                      className="border border-slate-300 rounded-lg px-2 py-2 text-xs bg-white"
+                    />
                     <input
                       type="number"
                       min="0"
                       step="0.5"
                       value={newStaffAnnualLeave}
                       onChange={(e) => setNewStaffAnnualLeave(e.target.value)}
-                      placeholder="연차일수"
-                      title="부여 연차 일수"
-                      className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-center font-semibold"
+                      placeholder="자동산출 연차"
+                      title="부여 연차/월차 일수"
+                      className="border border-slate-300 rounded-lg px-2 py-2 text-xs bg-white text-center font-semibold"
                     />
-                    <input type="text" maxLength={4} value={newStaffPin} onChange={(e) => setNewStaffPin(e.target.value.replace(/\D/g, ''))} placeholder="초기 PIN 4자리" className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-center font-mono" required />
-                    <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg px-4 py-2 text-sm flex items-center justify-center gap-1">
-                      <Plus className="w-4 h-4" />직원 추가
+                    <input type="text" maxLength={4} value={newStaffPin} onChange={(e) => setNewStaffPin(e.target.value.replace(/\D/g, ''))} placeholder="초기 PIN 4자리" className="border border-slate-300 rounded-lg px-2.5 py-2 text-xs bg-white text-center font-mono" required />
+                    <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg px-3 py-2 text-xs flex items-center justify-center gap-1">
+                      <Plus className="w-3.5 h-3.5" />직원 추가
                     </button>
                   </form>
+
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs text-left">
                       <thead>
                         <tr className="border-b border-slate-200 text-slate-500">
-                          <th className="py-2">성명</th>
-                          <th className="py-2">소속 매장</th>
-                          <th className="py-2">직책</th>
-                          <th className="py-2 text-center">잔여 연차(일)</th>
-                          <th className="py-2">현재 PIN</th>
-                          <th className="py-2 text-right">관리</th>
+                          <th className="py-2 px-1.5">성명 / 상태</th>
+                          <th className="py-2 px-1.5">소속 매장</th>
+                          <th className="py-2 px-1.5">직책</th>
+                          <th className="py-2 px-1.5 text-center">입사일</th>
+                          <th className="py-2 px-1.5 text-center">부여연차(자동/수정)</th>
+                          <th className="py-2 px-1.5 text-center">잔여</th>
+                          <th className="py-2 px-1.5">PIN</th>
+                          <th className="py-2 px-1.5 text-right">관리</th>
                         </tr>
                       </thead>
                       <tbody>
                         {staffList.map((stf) => {
                           const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
+                          const isResigned = stf.status === 'RESIGNED';
+                          const summary = leaveSummaryByStaff[stf.id];
                           return (
-                            <tr key={stf.id} className="border-b border-slate-100">
-                              <td className="py-2.5 font-bold">{stf.name}</td>
-                              <td className="py-2.5">{stName}</td>
-                              <td className="py-2.5">{stf.role}</td>
-                              <td className="py-2.5 text-center">
+                            <tr key={stf.id} className={isResigned ? 'border-b border-slate-100 bg-slate-50 text-slate-400' : 'border-b border-slate-100'}>
+                              <td className="py-2.5 px-1.5 font-bold whitespace-nowrap">
+                                <span className={isResigned ? 'text-slate-500' : 'text-slate-800'}>{stf.name}</span>
+                                {isResigned ? (
+                                  <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-bold">
+                                    퇴사({stf.resignedAt || '정지'})
+                                  </span>
+                                ) : (
+                                  <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold">
+                                    재직
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-1.5">{stName}</td>
+                              <td className="py-2.5 px-1.5">
+                                <select
+                                  value={stf.role}
+                                  disabled={isResigned}
+                                  onChange={(e) => handleUpdateStaffRole(stf.id, e.target.value)}
+                                  className="border border-slate-300 rounded px-1.5 py-1 text-xs bg-white text-slate-800 font-medium"
+                                >
+                                  {ROLE_OPTIONS.map((r) => (
+                                    <option key={r} value={r}>{r}</option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td className="py-2.5 px-1.5 text-center">
+                                <input
+                                  type="date"
+                                  value={stf.hireDate || ''}
+                                  disabled={isResigned}
+                                  onChange={(e) => handleUpdateStaffHireDate(stf.id, e.target.value)}
+                                  className="border border-slate-300 rounded px-1.5 py-1 text-[11px] bg-white text-slate-700"
+                                />
+                              </td>
+                              <td className="py-2.5 px-1.5 text-center whitespace-nowrap">
                                 <input
                                   type="number"
                                   min="0"
                                   step="0.5"
-                                  value={stf.annualLeave ?? 0}
+                                  disabled={isResigned}
+                                  value={summary ? summary.granted : (stf.annualLeave ?? 0)}
                                   onChange={(e) => handleUpdateStaffLeaveDays(stf.id, e.target.value)}
-                                  className="w-20 border border-slate-300 rounded px-2 py-1 text-center font-semibold"
+                                  className="w-16 border border-slate-300 rounded px-1.5 py-1 text-center font-semibold text-slate-800 bg-white"
                                 />
+                                {!isResigned && stf.hireDate && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleApplyAutoLeaveByHireDate(stf.id)}
+                                    title="입사일 기준 연차/월차 자동 재계산 적용"
+                                    className="ml-1 px-1.5 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 text-[10px] font-bold"
+                                  >
+                                    자동계산
+                                  </button>
+                                )}
                               </td>
-                              <td className="py-2.5 font-mono font-bold text-indigo-600">{stf.pin}</td>
-                              <td className="py-2.5 text-right space-x-2">
-                                <button onClick={() => handleResetStaffPin(stf.id, stf.name)} className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 hover:bg-slate-100 text-slate-700">
-                                  <Edit3 className="w-3 h-3" />PIN 변경
-                                </button>
-                                <button onClick={() => handleDeleteStaff(stf.id, stf.name)} className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-rose-200 text-rose-600 hover:bg-rose-50">
-                                  <Trash2 className="w-3 h-3" />삭제
-                                </button>
+                              <td className="py-2.5 px-1.5 text-center font-bold text-indigo-700 whitespace-nowrap">
+                                {formatDays(summary?.remaining ?? stf.annualLeave ?? 0)}일
+                              </td>
+                              <td className="py-2.5 px-1.5 font-mono font-bold text-indigo-600">{stf.pin}</td>
+                              <td className="py-2.5 px-1.5 text-right whitespace-nowrap space-x-1.5">
+                                {!isResigned ? (
+                                  <>
+                                    <button onClick={() => handleResetStaffPin(stf.id, stf.name)} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-300 hover:bg-slate-100 text-slate-700">
+                                      <Edit3 className="w-3 h-3" />PIN
+                                    </button>
+                                    <button onClick={() => handleResignStaff(stf.id, stf.name)} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-200 text-rose-600 hover:bg-rose-50 font-semibold">
+                                      <UserX className="w-3 h-3" />퇴사처리
+                                    </button>
+                                  </>
+                                ) : (
+                                  <button onClick={() => handleReinstateStaff(stf.id, stf.name)} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 font-semibold">
+                                    재직복원
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           );
