@@ -104,14 +104,30 @@ const isStaffHiddenOnDate = (staff, dateStr) => {
   return false;
 };
 
-const WORK_GROUPS = ['A조', 'B조', 'C조', 'F조'];
+const WORK_GROUPS = ['A조', 'A+', 'B조', 'B+', 'C조', 'C+', 'F조'];
+const BASE_WORK_GROUPS = ['A조', 'B조', 'C조', 'F조'];
+const OVERTIME_CODES = ['A+', 'B+', 'C+'];
 const AUTO_WORK_GROUPS = ['A조', 'C조'];
 const ROLE_OPTIONS = ['TF팀장', '슈퍼바이저', '매니저', '시니어', '사원', '아르바이트'];
 
+const isWorkCode = (code) => WORK_GROUPS.includes(code);
+const isOvertimeCode = (code) => OVERTIME_CODES.includes(code);
+
+const normalizeBaseGroup = (code) => {
+  if (code === 'A조' || code === 'A+') return 'A조';
+  if (code === 'B조' || code === 'B+') return 'B조';
+  if (code === 'C조' || code === 'C+') return 'C조';
+  if (code === 'F조') return 'F조';
+  return null;
+};
+
 const SHIFT_TYPES = [
   { code: 'A조', label: 'A조 근무', color: 'bg-sky-100 text-sky-800 border-sky-200', isWork: true },
+  { code: 'A+', label: 'A조 연장', color: 'bg-sky-200 text-sky-950 border-sky-400', isWork: true },
   { code: 'B조', label: 'B조 근무', color: 'bg-indigo-100 text-indigo-800 border-indigo-200', isWork: true },
+  { code: 'B+', label: 'B조 연장', color: 'bg-indigo-200 text-indigo-950 border-indigo-400', isWork: true },
   { code: 'C조', label: 'C조 근무', color: 'bg-purple-100 text-purple-800 border-purple-200', isWork: true },
+  { code: 'C+', label: 'C조 연장', color: 'bg-purple-200 text-purple-950 border-purple-400', isWork: true },
   { code: 'F조', label: 'F조 근무', color: 'bg-cyan-100 text-cyan-800 border-cyan-200', isWork: true },
   { code: '휴무', label: '정기휴무', color: 'bg-slate-100 text-slate-600 border-slate-200', isWork: false },
   { code: '연차', label: '연차휴가', color: 'bg-amber-100 text-amber-800 border-amber-200', isWork: false },
@@ -1013,29 +1029,52 @@ export default function App() {
     const map = {};
     visibleStaff.forEach((stf) => {
       let workDays = 0;
+      let overtimeDays = 0;
       let offDays = 0;
       let leaveUsed = 0;
+      let streak = 0;
+      let maxStreak = 0;
+
       daysInMonth.forEach((d) => {
-        if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+        if (isStaffHiddenOnDate(stf, d.dateStr)) {
+          streak = 0;
+          return;
+        }
         const code = schedules[d.dateStr + '_' + stf.id] || '';
-        if (WORK_GROUPS.includes(code)) {
+        if (isWorkCode(code)) {
           workDays += 1;
-        } else if (code === '휴무') {
-          offDays += 1;
-        } else if (code === '연차') {
-          leaveUsed += 1;
-        } else if (code === '반차') {
-          leaveUsed += 0.5;
+          streak += 1;
+          if (streak > maxStreak) maxStreak = streak;
+          if (isOvertimeCode(code)) {
+            overtimeDays += 1;
+          }
+        } else {
+          streak = 0;
+          if (code === '휴무') {
+            offDays += 1;
+          } else if (code === '연차') {
+            leaveUsed += 1;
+          } else if (code === '반차') {
+            leaveUsed += 0.5;
+          }
         }
       });
       map[stf.id] = {
         workDays,
+        overtimeDays,
         offDays,
-        leaveUsed: Number(leaveUsed.toFixed(1))
+        leaveUsed: Number(leaveUsed.toFixed(1)),
+        maxStreak
       };
     });
     return map;
   }, [visibleStaff, daysInMonth, schedules]);
+
+  const overStreakStaffNames = useMemo(() => {
+    return visibleStaff
+      .filter((stf) => (scheduleSummaryByStaff[stf.id]?.maxStreak || 0) >= 4)
+      .map((stf) => stf.name + '(' + scheduleSummaryByStaff[stf.id].maxStreak + '일)');
+  }, [visibleStaff, scheduleSummaryByStaff]);
 
   const handleDownloadScheduleExcel = () => {
     const headers = [
@@ -1045,6 +1084,7 @@ export default function App() {
       '잔여연차',
       ...daysInMonth.map((d) => d.day + '일(' + d.dayName + ')'),
       '근무날수',
+      '연장(+)',
       '휴무날수',
       '연차 사용수'
     ];
@@ -1054,8 +1094,8 @@ export default function App() {
       const dayCells = daysInMonth.map((d) =>
         isStaffHiddenOnDate(stf, d.dateStr) ? '' : schedules[d.dateStr + '_' + stf.id] || ''
       );
-      const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, offDays: 0, leaveUsed: 0 };
-      return [stName, stf.name, stf.role, rem, ...dayCells, sum.workDays, sum.offDays, sum.leaveUsed];
+      const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, overtimeDays: 0, offDays: 0, leaveUsed: 0 };
+      return [stName, stf.name, stf.role, rem, ...dayCells, sum.workDays, sum.overtimeDays, sum.offDays, sum.leaveUsed];
     });
     const filterLabel = isAdmin
       ? selectedStoreId === 'ALL'
@@ -1190,6 +1230,7 @@ export default function App() {
         totalAllocated: 0,
         totalAllocatedQty: 0,
         workDaysCount: 0,
+        overtimeDaysCount: 0,
         groupStats: {
           'A조': { sum: 0, qtySum: 0, count: 0 },
           'B조': { sum: 0, qtySum: 0, count: 0 },
@@ -1212,22 +1253,26 @@ export default function App() {
         if (stf.storeId !== storeId) return false;
         if (isStaffHiddenOnDate(stf, dateStr)) return false;
         const shift = schedules[dateStr + '_' + stf.id];
-        return WORK_GROUPS.includes(shift);
+        return isWorkCode(shift);
       });
 
       if (workingOnDay.length === 0) return;
 
       workingOnDay.forEach((stf) => {
         const shift = schedules[dateStr + '_' + stf.id];
+        const baseGroup = normalizeBaseGroup(shift);
         const entry = statsByStaff[stf.id];
         if (!entry) return;
         entry.totalAllocated += daySales;
         entry.totalAllocatedQty += dayQty;
         entry.workDaysCount += 1;
-        if (entry.groupStats[shift]) {
-          entry.groupStats[shift].sum += daySales;
-          entry.groupStats[shift].qtySum += dayQty;
-          entry.groupStats[shift].count += 1;
+        if (isOvertimeCode(shift)) {
+          entry.overtimeDaysCount += 1;
+        }
+        if (baseGroup && entry.groupStats[baseGroup]) {
+          entry.groupStats[baseGroup].sum += daySales;
+          entry.groupStats[baseGroup].qtySum += dayQty;
+          entry.groupStats[baseGroup].count += 1;
         }
       });
     });
@@ -1246,7 +1291,7 @@ export default function App() {
         const overallAvg = item.workDaysCount > 0 ? Math.round(item.totalAllocated / item.workDaysCount) : 0;
         const overallAvgQty = item.workDaysCount > 0 ? Number((item.totalAllocatedQty / item.workDaysCount).toFixed(1)) : 0;
         const groupAverages = {};
-        WORK_GROUPS.forEach((g) => {
+        BASE_WORK_GROUPS.forEach((g) => {
           const gs = item.groupStats[g];
           groupAverages[g] = gs.count > 0 ? Math.round(gs.sum / gs.count) : null;
         });
@@ -1315,6 +1360,7 @@ export default function App() {
       '상태',
       '소속 매장',
       '출근일수',
+      '연장일수(+)',
       '총 배분매출(USD)',
       '총 배분수량(PCS)',
       '출근일 평균매출(USD)',
@@ -1330,6 +1376,7 @@ export default function App() {
       row.staff.status === 'RESIGNED' ? '퇴사' : '재직',
       row.storeName,
       row.workDaysCount,
+      row.overtimeDaysCount,
       row.totalAllocatedRounded,
       row.totalAllocatedQtyRounded,
       row.overallAvg,
@@ -1400,7 +1447,7 @@ export default function App() {
       autoStoreStaff.forEach((stf) => {
         if (isStaffHiddenOnDate(stf, dtStr)) return;
         const shift = schedules[dtStr + '_' + stf.id];
-        if (WORK_GROUPS.includes(shift)) {
+        if (isWorkCode(shift)) {
           countOnDay += 1;
         }
       });
@@ -1442,17 +1489,18 @@ export default function App() {
 
       const workingToday = autoStoreStaff.filter((stf) => {
         if (isStaffHiddenOnDate(stf, dtStr)) return false;
-        return WORK_GROUPS.includes(schedules[dtStr + '_' + stf.id]);
+        return isWorkCode(schedules[dtStr + '_' + stf.id]);
       });
       if (workingToday.length === 0) return;
 
       workingToday.forEach((stf) => {
         const shift = schedules[dtStr + '_' + stf.id];
+        const baseGrp = normalizeBaseGroup(shift);
         staffTotalSales[stf.id].sum += daySales;
         staffTotalSales[stf.id].count += 1;
-        if (shift === 'A조' || shift === 'C조') {
-          staffGroupSales[stf.id][shift].sum += daySales;
-          staffGroupSales[stf.id][shift].count += 1;
+        if (baseGrp === 'A조' || baseGrp === 'C조') {
+          staffGroupSales[stf.id][baseGrp].sum += daySales;
+          staffGroupSales[stf.id][baseGrp].count += 1;
         }
       });
 
@@ -1499,33 +1547,59 @@ export default function App() {
     const draft = {};
     const offCountByStaff = {};
     const workCountByStaff = {};
+    const overtimeCountByStaff = {};
     const leaveCountByStaff = {};
     const lastGroupByStaff = {};
     const groupRotationIdx = {};
-    const activeDaysByStaff = {};
     const targetOffByStaff = {};
 
     autoStoreStaff.forEach((stf, idx) => {
       const validDays = daysInMonth.filter((d) => !isStaffHiddenOnDate(stf, d.dateStr));
-      activeDaysByStaff[stf.id] = validDays.length;
       const validRedDays = validDays.filter((d) => d.isRedDay).length;
       targetOffByStaff[stf.id] = Math.min(validRedDays, validDays.length);
 
       offCountByStaff[stf.id] = 0;
       workCountByStaff[stf.id] = 0;
+      overtimeCountByStaff[stf.id] = 0;
       leaveCountByStaff[stf.id] = 0;
       lastGroupByStaff[stf.id] = idx % 2 === 0 ? 'C조' : 'A조';
       groupRotationIdx[stf.id] = idx % 2;
     });
 
-    const isConsecutiveTwoDaysWork = (stfId, dayIdx) => {
-      if (dayIdx < 2) return false;
-      const d1 = daysInMonth[dayIdx - 1].dateStr;
-      const d2 = daysInMonth[dayIdx - 2].dateStr;
-      return (
-        AUTO_WORK_GROUPS.includes(draft[d1 + '_' + stfId]) &&
-        AUTO_WORK_GROUPS.includes(draft[d2 + '_' + stfId])
-      );
+    const getPriorConsecutiveWorkDays = (stfId, dayIdx) => {
+      let streak = 0;
+      for (let back = 1; back <= 3; back++) {
+        if (dayIdx - back < 0) break;
+        const prevDateStr = daysInMonth[dayIdx - back].dateStr;
+        if (isWorkCode(draft[prevDateStr + '_' + stfId])) {
+          streak += 1;
+        } else {
+          break;
+        }
+      }
+      return streak;
+    };
+
+    const wouldExceedThreeConsecutiveWork = (stfId, dayIdx) => {
+      let before = 0;
+      for (let back = 1; back <= 3; back++) {
+        if (dayIdx - back < 0) break;
+        if (isWorkCode(draft[daysInMonth[dayIdx - back].dateStr + '_' + stfId])) {
+          before += 1;
+        } else {
+          break;
+        }
+      }
+      let after = 0;
+      for (let fwd = 1; fwd <= 3; fwd++) {
+        if (dayIdx + fwd >= daysInMonth.length) break;
+        if (isWorkCode(draft[daysInMonth[dayIdx + fwd].dateStr + '_' + stfId])) {
+          after += 1;
+        } else {
+          break;
+        }
+      }
+      return before + 1 + after >= 4;
     };
 
     const totalDays = daysInMonth.length;
@@ -1550,12 +1624,13 @@ export default function App() {
         const goalOff = targetOffByStaff[stf.id] ?? monthRedDayCount;
         const needOff = goalOff - offCountByStaff[stf.id];
 
-        if (needOff > 0 && needOff >= remainingDaysAfterToday + 1) {
+        if (getPriorConsecutiveWorkDays(stf.id, dayIdx) >= 3) {
           mustTakeOffToday.push(stf);
           return;
         }
 
-        if (isConsecutiveTwoDaysWork(stf.id, dayIdx)) {
+        if (needOff > 0 && needOff >= remainingDaysAfterToday + 1) {
+          mustTakeOffToday.push(stf);
           return;
         }
 
@@ -1637,8 +1712,8 @@ export default function App() {
         if (isStaffHiddenOnDate(stf, d.dateStr)) continue;
         const key = d.dateStr + '_' + stf.id;
         const cur = draft[key];
-        if (!cur || AUTO_WORK_GROUPS.includes(cur)) {
-          if (AUTO_WORK_GROUPS.includes(cur)) {
+        if (!cur || isWorkCode(cur)) {
+          if (isWorkCode(cur)) {
             workCountByStaff[stf.id] = Math.max(0, workCountByStaff[stf.id] - 1);
           }
           draft[key] = '휴무';
@@ -1650,17 +1725,26 @@ export default function App() {
         if (isStaffHiddenOnDate(stf, d.dateStr)) return;
         const key = d.dateStr + '_' + stf.id;
         if (!draft[key]) {
-          const prevGrp = lastGroupByStaff[stf.id];
-          const nextGrp = isConsecutiveTwoDaysWork(stf.id, dayIdx)
-            ? prevGrp === 'A조'
-              ? 'C조'
-              : 'A조'
-            : prevGrp === 'A조'
-            ? 'C조'
-            : 'A조';
-          draft[key] = nextGrp;
-          lastGroupByStaff[stf.id] = nextGrp;
-          workCountByStaff[stf.id] += 1;
+          if (wouldExceedThreeConsecutiveWork(stf.id, dayIdx)) {
+            draft[key] = '휴무';
+            offCountByStaff[stf.id] += 1;
+          } else {
+            const prevGrp = lastGroupByStaff[stf.id];
+            const nextGrp = prevGrp === 'A조' ? 'C조' : 'A조';
+            draft[key] = nextGrp;
+            lastGroupByStaff[stf.id] = nextGrp;
+            workCountByStaff[stf.id] += 1;
+          }
+        }
+      });
+
+      daysInMonth.forEach((d, dayIdx) => {
+        if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+        const key = d.dateStr + '_' + stf.id;
+        if (isWorkCode(draft[key]) && getPriorConsecutiveWorkDays(stf.id, dayIdx) >= 3) {
+          draft[key] = '휴무';
+          workCountByStaff[stf.id] = Math.max(0, workCountByStaff[stf.id] - 1);
+          offCountByStaff[stf.id] += 1;
         }
       });
     });
@@ -1675,6 +1759,7 @@ export default function App() {
       redDayCountInMonth: monthRedDayCount,
       topPairs: topPairsSummary.slice(0, 5),
       workCountByStaff,
+      overtimeCountByStaff,
       offCountByStaff,
       leaveCountByStaff,
       targetOffByStaff
@@ -1685,9 +1770,9 @@ export default function App() {
         year +
         '년 ' +
         (month + 1) +
-        '월 추천 스케줄(토·일·공휴일 ' +
+        '월 추천 스케줄(최대 3일 연속 근무 제한 준수 · 토·일·공휴일 ' +
         monthRedDayCount +
-        '일 기준 휴무 배정 및 나머지 일자 근무 배정 완료)이 생성되었습니다.'
+        '일 기준 휴무 제안 완료)이 생성되었습니다.'
     );
   };
 
@@ -1696,15 +1781,18 @@ export default function App() {
     daysInMonth.forEach((d) => {
       let aCount = 0;
       let cCount = 0;
+      let otCount = 0;
       autoStoreStaff.forEach((stf) => {
         if (isStaffHiddenOnDate(stf, d.dateStr)) return;
         const code = autoDraftSchedule[d.dateStr + '_' + stf.id];
-        if (code === 'A조') aCount += 1;
-        else if (code === 'C조') cCount += 1;
+        if (code === 'A조' || code === 'A+') aCount += 1;
+        else if (code === 'C조' || code === 'C+') cCount += 1;
+        if (isOvertimeCode(code)) otCount += 1;
       });
       result[d.dateStr] = {
         aCount,
         cCount,
+        otCount,
         total: aCount + cCount
       };
     });
@@ -1769,13 +1857,17 @@ export default function App() {
   const dailyGroupCounts = useMemo(() => {
     const result = {};
     daysInMonth.forEach((d) => {
-      const counts = { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0, total: 0 };
+      const counts = { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0, total: 0, overtime: 0 };
       visibleStaff.forEach((stf) => {
         if (isStaffHiddenOnDate(stf, d.dateStr)) return;
         const shift = schedules[d.dateStr + '_' + stf.id];
-        if (WORK_GROUPS.includes(shift)) {
-          counts[shift] += 1;
+        if (isWorkCode(shift)) {
+          const base = normalizeBaseGroup(shift);
+          if (base) counts[base] += 1;
           counts.total += 1;
+          if (isOvertimeCode(shift)) {
+            counts.overtime += 1;
+          }
         }
       });
       result[d.dateStr] = counts;
@@ -2063,7 +2155,7 @@ export default function App() {
             <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <h2 className="font-bold text-base">월간 근무 스케줄표 (A조 · B조 · C조 · F조)</h2>
+                  <h2 className="font-bold text-base">월간 근무 스케줄표 (A조 · B조 · C조 · F조 · 연장+)</h2>
                   {currentFilterStoreId && currentFilterStoreId !== 'ALL' && (
                     <span className={currentStoreApproved
                       ? 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-800 inline-flex items-center gap-1'
@@ -2084,8 +2176,13 @@ export default function App() {
                   )}
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  퇴사일 다음 날부터는 스케줄표에서 자동으로 제외됩니다. 우측에 근무날수 · 휴무날수 · 연차 사용수가 표시됩니다.
+                  연장 근무는 <strong>A+ · B+ · C+</strong>로 표기하며, 우측 합계 열에서 <strong>근무날수 · 연장(+) · 휴무날수 · 연차 사용수</strong>를 확인할 수 있습니다.
                 </p>
+                {overStreakStaffNames.length > 0 && (
+                  <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 mt-1.5 font-medium">
+                    4일 이상 연속 근무 주의: {overStreakStaffNames.join(', ')} (3일 연속 근무 후 휴무 배치를 권장합니다)
+                  </p>
+                )}
                 {currentStoreRejected && currentApprovalInfo?.rejectReason && (
                   <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 mt-1.5">
                     반려 사유: {currentApprovalInfo.rejectReason}
@@ -2168,7 +2265,7 @@ export default function App() {
               <table className="w-full border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-100 text-slate-700">
-                    <th className="sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 px-3 py-2.5 text-left min-w-[155px]">
+                    <th className="sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 px-3 py-2.5 text-left min-w-[160px]">
                       직원 (매장·잔여연차)
                     </th>
                     {daysInMonth.map((d) => {
@@ -2188,6 +2285,9 @@ export default function App() {
                     <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-indigo-50/80 text-indigo-900">
                       근무날수
                     </th>
+                    <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[60px] bg-sky-100/80 text-sky-900">
+                      연장(+)
+                    </th>
                     <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-slate-100 text-slate-800">
                       휴무날수
                     </th>
@@ -2200,13 +2300,18 @@ export default function App() {
                   {visibleStaff.map((stf) => {
                     const stName = stores.find((s) => s.id === stf.storeId)?.name || '';
                     const remLeave = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
-                    const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, offDays: 0, leaveUsed: 0 };
+                    const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, overtimeDays: 0, offDays: 0, leaveUsed: 0, maxStreak: 0 };
                     return (
                       <tr key={stf.id} className="hover:bg-slate-50/70">
                         <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2">
-                          <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                          <div className="font-semibold text-slate-800 flex items-center gap-1.5 flex-wrap">
                             <span>{stf.name}</span>
                             <span className="text-[10px] font-normal text-slate-500">{stf.role}</span>
+                            {sum.maxStreak >= 4 && (
+                              <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-100 text-rose-700 font-bold">
+                                {sum.maxStreak}연근
+                              </span>
+                            )}
                             {stf.status === 'RESIGNED' && (
                               <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-100 text-rose-700 font-bold">
                                 퇴사({stf.resignedAt})
@@ -2252,6 +2357,9 @@ export default function App() {
                         <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-bold text-indigo-700 bg-indigo-50/30">
                           {sum.workDays}일
                         </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-extrabold text-sky-800 bg-sky-50/50">
+                          {sum.overtimeDays}일
+                        </td>
                         <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-700 bg-slate-50/60">
                           {sum.offDays}일
                         </td>
@@ -2265,17 +2373,20 @@ export default function App() {
                 <tfoot>
                   <tr className="bg-indigo-50/70 font-semibold text-slate-800">
                     <td className="sticky left-0 z-10 bg-indigo-50 border-t-2 border-r border-slate-300 px-3 py-2 text-xs">
-                      일별 근무인원 (A·B·C·F조)
+                      일별 근무인원 (연장 포함)
                     </td>
                     {daysInMonth.map((d) => {
-                      const c = dailyGroupCounts[d.dateStr] || { total: 0 };
+                      const c = dailyGroupCounts[d.dateStr] || { total: 0, overtime: 0 };
                       return (
                         <td key={d.dateStr} className="border-t-2 border-r border-slate-300 px-1 py-2 text-center">
                           <div className="text-xs font-bold text-indigo-700">{c.total}명</div>
+                          {c.overtime > 0 && (
+                            <div className="text-[10px] font-bold text-sky-700">+{c.overtime}</div>
+                          )}
                         </td>
                       );
                     })}
-                    <td colSpan={3} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-500">
+                    <td colSpan={4} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-500">
                       인원별 합계 열 참조
                     </td>
                   </tr>
@@ -2295,7 +2406,7 @@ export default function App() {
                     <span>{year}년 {month + 1}월 매장별 자동 스케줄표 추천</span>
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    당월 토요일·일요일·공휴일({monthRedDayCount}일) 수만큼 <strong>휴무</strong>가 배정되며, 나머지 날짜는 <strong>근무(A조/C조)</strong>로 배정됩니다. 퇴사일 이후는 자동 제외됩니다.
+                    <strong>최대 3일 연속 근무 제한(3일 근무 후 반드시 휴무 제안)</strong>을 지키며, 당월 토·일·공휴일({monthRedDayCount}일) 수만큼 <strong>휴무</strong>가 배정됩니다.
                   </p>
                 </div>
 
@@ -2355,7 +2466,7 @@ export default function App() {
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
                 <div className="p-4 border-b border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs text-slate-700 font-medium">
-                    <span className="font-bold text-indigo-700">{autoAnalysisMeta.storeName}</span> · 토·일·공휴일 기준 휴무: <span className="font-bold">{autoAnalysisMeta.redDayCountInMonth}일</span> · 전월({autoAnalysisMeta.prevMonthLabel}) 데이터: <span className="font-bold">{autoAnalysisMeta.hasPrevData ? '반영됨' : '기본 목표치 적용'}</span>
+                    <span className="font-bold text-indigo-700">{autoAnalysisMeta.storeName}</span> · 최대 연속근무: <span className="font-bold text-emerald-700">3일 제한 적용</span> · 토·일·공휴일 기준 휴무: <span className="font-bold">{autoAnalysisMeta.redDayCountInMonth}일</span>
                   </div>
                   <div className="text-[11px] text-slate-500">
                     요일별 목표 출근: 일 {autoAnalysisMeta.weekdayTargetHeadcount[0]} · 월 {autoAnalysisMeta.weekdayTargetHeadcount[1]} · 화 {autoAnalysisMeta.weekdayTargetHeadcount[2]} · 수 {autoAnalysisMeta.weekdayTargetHeadcount[3]} · 목 {autoAnalysisMeta.weekdayTargetHeadcount[4]} · 금 {autoAnalysisMeta.weekdayTargetHeadcount[5]} · 토 {autoAnalysisMeta.weekdayTargetHeadcount[6]}
@@ -2397,6 +2508,9 @@ export default function App() {
                         <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-indigo-50/80 text-indigo-900">
                           근무날수
                         </th>
+                        <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[60px] bg-sky-100/80 text-sky-900">
+                          연장(+)
+                        </th>
                         <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-slate-100 text-slate-800">
                           휴무날수
                         </th>
@@ -2408,6 +2522,7 @@ export default function App() {
                     <tbody>
                       {autoStoreStaff.map((stf) => {
                         const wCnt = autoAnalysisMeta.workCountByStaff[stf.id] ?? 0;
+                        const otCnt = autoAnalysisMeta.overtimeCountByStaff?.[stf.id] ?? 0;
                         const oCnt = autoAnalysisMeta.offCountByStaff[stf.id] ?? 0;
                         const lCnt = autoAnalysisMeta.leaveCountByStaff?.[stf.id] ?? 0;
                         return (
@@ -2448,6 +2563,9 @@ export default function App() {
                             <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-bold text-indigo-700 bg-indigo-50/30">
                               {wCnt}일
                             </td>
+                            <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-extrabold text-sky-800 bg-sky-50/50">
+                              {otCnt}일
+                            </td>
                             <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-700 bg-slate-50/60">
                               {oCnt}일
                             </td>
@@ -2476,7 +2594,7 @@ export default function App() {
                             </td>
                           );
                         })}
-                        <td colSpan={3} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-600">
+                        <td colSpan={4} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-600">
                           우측 일수 집계 참조
                         </td>
                       </tr>
@@ -2626,7 +2744,7 @@ export default function App() {
               <div>
                 <h2 className="font-bold text-base">{year}년 {month + 1}월 사원별 출근일 매출 배분 · 조별 평균 집계</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  당일 출근한 모든 직원에게 일매출·수량을 동일 배분하여 출근일 평균과 조별 평균을 산출합니다.
+                  당일 출근한 모든 직원(A+·B+·C+ 연장 포함)에게 일매출·수량을 동일 배분하여 출근일 평균과 조별 평균을 산출합니다.
                 </p>
               </div>
               <button
@@ -2656,6 +2774,11 @@ export default function App() {
                         출근일수 {renderSortIcon('workDaysCount')}
                       </button>
                     </th>
+                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center bg-sky-50/70">
+                      <button type="button" onClick={() => handleHeaderSort('overtimeDaysCount')} className="font-bold inline-flex items-center text-sky-900">
+                        연장(+) {renderSortIcon('overtimeDaysCount')}
+                      </button>
+                    </th>
                     <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
                       <button type="button" onClick={() => handleHeaderSort('totalAllocatedRounded')} className="font-bold inline-flex items-center">
                         총 배분매출 {renderSortIcon('totalAllocatedRounded')}
@@ -2676,7 +2799,7 @@ export default function App() {
                         일 평균수량 {renderSortIcon('overallAvgQty')}
                       </button>
                     </th>
-                    {WORK_GROUPS.map((g) => (
+                    {BASE_WORK_GROUPS.map((g) => (
                       <th key={g} className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
                         <button type="button" onClick={() => handleHeaderSort('group_' + g)} className="font-bold inline-flex items-center">
                           {g} 평균 {renderSortIcon('group_' + g)}
@@ -2691,11 +2814,12 @@ export default function App() {
                       <td className="border-b border-r border-slate-200 px-3 py-2.5 font-semibold">{row.staff.name}</td>
                       <td className="border-b border-r border-slate-200 px-3 py-2.5 text-slate-600">{row.storeName}</td>
                       <td className="border-b border-r border-slate-200 px-3 py-2.5 text-center font-semibold">{row.workDaysCount}일</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2.5 text-center font-bold text-sky-800 bg-sky-50/40">{row.overtimeDaysCount}일</td>
                       <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold">{formatUsd(row.totalAllocatedRounded)}</td>
                       <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold text-emerald-700">{formatQty(row.totalAllocatedQtyRounded)} PCS</td>
                       <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-bold text-indigo-700 bg-indigo-50/40">{formatUsd(row.overallAvg)}</td>
                       <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold text-emerald-700">{formatQty(row.overallAvgQty)} PCS</td>
-                      {WORK_GROUPS.map((g) => (
+                      {BASE_WORK_GROUPS.map((g) => (
                         <td key={g} className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
                           {row.groupAverages[g] !== null ? formatUsd(row.groupAverages[g]) : '-'}
                         </td>
