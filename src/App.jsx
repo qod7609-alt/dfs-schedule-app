@@ -4,7 +4,7 @@ import {
   LogOut, Plus, Trash2, CheckCircle2, XCircle, Edit3, KeyRound, ChevronLeft,
   ChevronRight, AlertCircle, ShieldCheck, UserCheck, FileSpreadsheet,
   Download, ShieldAlert, Send, RotateCcw, BarChart3, UserX, ArrowUpDown,
-  ArrowUp, ArrowDown, TableProperties
+  ArrowUp, ArrowDown, TableProperties, Sparkles, Check
 } from 'lucide-react';
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
@@ -44,6 +44,7 @@ const DEFAULT_STAFF = [
 ];
 
 const WORK_GROUPS = ['A조', 'B조', 'C조', 'F조'];
+const AUTO_WORK_GROUPS = ['A조', 'C조'];
 const ROLE_OPTIONS = ['TF팀장', '슈퍼바이저', '매니저', '시니어', '사원', '아르바이트'];
 
 const SHIFT_TYPES = [
@@ -173,6 +174,10 @@ export default function App() {
   const [sortField, setSortField] = useState('totalAllocatedRounded');
   const [sortDirection, setSortDirection] = useState('desc');
 
+  const [autoTargetStoreId, setAutoTargetStoreId] = useState('');
+  const [autoDraftSchedule, setAutoDraftSchedule] = useState({});
+  const [autoAnalysisMeta, setAutoAnalysisMeta] = useState(null);
+
   useEffect(() => {
     let unsubscribeSnapshot = null;
     const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
@@ -238,6 +243,21 @@ export default function App() {
 
   const isManager = !isAdmin && activeStaffProfile?.role === '매니저';
   const myStoreObj = !isAdmin ? stores.find((s) => s.id === activeStaffProfile?.storeId) : null;
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (isAdmin) {
+      if (!autoTargetStoreId) {
+        setAutoTargetStoreId(
+          selectedStoreId && selectedStoreId !== 'ALL'
+            ? selectedStoreId
+            : stores[0]?.id || 'store_1'
+        );
+      }
+    } else if (activeStaffProfile?.storeId) {
+      setAutoTargetStoreId(activeStaffProfile.storeId);
+    }
+  }, [currentUser, isAdmin, selectedStoreId, stores, activeStaffProfile, autoTargetStoreId]);
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
@@ -372,6 +392,7 @@ export default function App() {
         setCurrentUser({ role: 'staff', staff: target });
         setPinInput('');
         setSelectedStoreId(target.storeId);
+        setAutoTargetStoreId(target.storeId);
         setActiveTab('schedule');
       } else {
         setLoginError('개인 PIN 번호 4자리가 일치하지 않습니다.');
@@ -383,6 +404,8 @@ export default function App() {
     setCurrentUser(null);
     setPinInput('');
     setLoginError('');
+    setAutoDraftSchedule({});
+    setAutoAnalysisMeta(null);
   };
 
   const getStoreApprovalInfo = (storeId) => {
@@ -1234,6 +1257,332 @@ export default function App() {
     );
   };
 
+  const effectiveAutoStoreId = isAdmin
+    ? autoTargetStoreId || stores[0]?.id || 'store_1'
+    : activeStaffProfile?.storeId || stores[0]?.id || 'store_1';
+
+  const autoStoreObj = useMemo(
+    () => stores.find((s) => s.id === effectiveAutoStoreId) || stores[0],
+    [stores, effectiveAutoStoreId]
+  );
+
+  const autoStoreStaff = useMemo(
+    () => staffList.filter((s) => s.storeId === effectiveAutoStoreId && s.status !== 'RESIGNED'),
+    [staffList, effectiveAutoStoreId]
+  );
+
+  const redDayCountInMonth = useMemo(
+    () => daysInMonth.filter((d) => d.dayOfWeek === 0).length,
+    [daysInMonth]
+  );
+
+  const handleGenerateAutoSchedule = () => {
+    if (!effectiveAutoStoreId) return;
+    if (autoStoreStaff.length === 0) {
+      alert('선택한 매장에 재직 중인 사원이 없습니다.');
+      return;
+    }
+
+    const prevMonthDate = new Date(year, month - 1, 1);
+    const prevYear = prevMonthDate.getFullYear();
+    const prevMonth = prevMonthDate.getMonth();
+    const prevMonthPrefix = prevYear + '-' + String(prevMonth + 1).padStart(2, '0');
+    const prevTotalDays = new Date(prevYear, prevMonth + 1, 0).getDate();
+
+    const prevWeekdayWorkCounts = Array.from({ length: 7 }, () => []);
+    for (let dayNum = 1; dayNum <= prevTotalDays; dayNum++) {
+      const dObj = new Date(prevYear, prevMonth, dayNum);
+      const dow = dObj.getDay();
+      const dtStr =
+        prevYear +
+        '-' +
+        String(prevMonth + 1).padStart(2, '0') +
+        '-' +
+        String(dayNum).padStart(2, '0');
+
+      let countOnDay = 0;
+      autoStoreStaff.forEach((stf) => {
+        const shift = schedules[dtStr + '_' + stf.id];
+        if (WORK_GROUPS.includes(shift)) {
+          countOnDay += 1;
+        }
+      });
+      prevWeekdayWorkCounts[dow].push(countOnDay);
+    }
+
+    const hasPrevData = prevWeekdayWorkCounts.some((arr) =>
+      arr.some((c) => c > 0)
+    );
+
+    const fallbackDailyTarget = Math.max(
+      1,
+      Math.min(autoStoreStaff.length, Math.ceil(autoStoreStaff.length * 0.65))
+    );
+
+    const weekdayTargetHeadcount = prevWeekdayWorkCounts.map((arr) => {
+      if (!hasPrevData || arr.length === 0) return fallbackDailyTarget;
+      const avg = arr.reduce((acc, v) => acc + v, 0) / arr.length;
+      return Math.max(1, Math.min(autoStoreStaff.length, Math.round(avg)));
+    });
+
+    const staffGroupSales = {};
+    const staffTotalSales = {};
+    autoStoreStaff.forEach((stf) => {
+      staffGroupSales[stf.id] = {
+        'A조': { sum: 0, count: 0 },
+        'C조': { sum: 0, count: 0 }
+      };
+      staffTotalSales[stf.id] = { sum: 0, count: 0 };
+    });
+
+    const pairSales = {};
+    const getPairKey = (idA, idB) => ([idA, idB].sort().join('__'));
+
+    Object.entries(salesRecords).forEach(([key, rec]) => {
+      const parts = key.split('_');
+      const dtStr = parts[0];
+      const stId = parts.slice(1).join('_');
+      if (stId !== effectiveAutoStoreId) return;
+      const daySales = Number(rec.amount) || 0;
+      if (daySales <= 0) return;
+
+      const workingToday = autoStoreStaff.filter((stf) =>
+        WORK_GROUPS.includes(schedules[dtStr + '_' + stf.id])
+      );
+      if (workingToday.length === 0) return;
+
+      workingToday.forEach((stf) => {
+        const shift = schedules[dtStr + '_' + stf.id];
+        staffTotalSales[stf.id].sum += daySales;
+        staffTotalSales[stf.id].count += 1;
+        if (shift === 'A조' || shift === 'C조') {
+          staffGroupSales[stf.id][shift].sum += daySales;
+          staffGroupSales[stf.id][shift].count += 1;
+        }
+      });
+
+      for (let i = 0; i < workingToday.length; i++) {
+        for (let j = i + 1; j < workingToday.length; j++) {
+          const pKey = getPairKey(workingToday[i].id, workingToday[j].id);
+          if (!pairSales[pKey]) pairSales[pKey] = { sum: 0, count: 0 };
+          pairSales[pKey].sum += daySales;
+          pairSales[pKey].count += 1;
+        }
+      }
+    });
+
+    const getPairAvg = (idA, idB) => {
+      const entry = pairSales[getPairKey(idA, idB)];
+      if (!entry || entry.count === 0) return 0;
+      return entry.sum / entry.count;
+    };
+
+    const getStaffGroupAvg = (stfId, groupCode) => {
+      const gEntry = staffGroupSales[stfId]?.[groupCode];
+      if (gEntry && gEntry.count > 0) return gEntry.sum / gEntry.count;
+      const tEntry = staffTotalSales[stf.id];
+      if (tEntry && tEntry.count > 0) return tEntry.sum / tEntry.count;
+      return 0;
+    };
+
+    const topPairsSummary = [];
+    for (let i = 0; i < autoStoreStaff.length; i++) {
+      for (let j = i + 1; j < autoStoreStaff.length; j++) {
+        const avg = getPairAvg(autoStoreStaff[i].id, autoStoreStaff[j].id);
+        const cnt = pairSales[getPairKey(autoStoreStaff[i].id, autoStoreStaff[j].id)]?.count || 0;
+        if (avg > 0) {
+          topPairsSummary.push({
+            names: autoStoreStaff[i].name + ' + ' + autoStoreStaff[j].name,
+            avgSales: Math.round(avg),
+            daysCount: cnt
+          });
+        }
+      }
+    }
+    topPairsSummary.sort((a, b) => b.avgSales - a.avgSales);
+
+    const draft = {};
+    const offCountByStaff = {};
+    const workCountByStaff = {};
+    const lastGroupByStaff = {};
+    const groupRotationIdx = {};
+
+    autoStoreStaff.forEach((stf, idx) => {
+      offCountByStaff[stf.id] = 0;
+      workCountByStaff[stf.id] = 0;
+      lastGroupByStaff[stf.id] = idx % 2 === 0 ? 'C조' : 'A조';
+      groupRotationIdx[stf.id] = idx % 2;
+    });
+
+    const isConsecutiveTwoDaysWork = (stfId, dayIdx) => {
+      if (dayIdx < 2) return false;
+      const d1 = daysInMonth[dayIdx - 1].dateStr;
+      const d2 = daysInMonth[dayIdx - 2].dateStr;
+      return (
+        AUTO_WORK_GROUPS.includes(draft[d1 + '_' + stfId]) &&
+        AUTO_WORK_GROUPS.includes(draft[d2 + '_' + stfId])
+      );
+    };
+
+    const totalDays = daysInMonth.length;
+
+    daysInMonth.forEach((d, dayIdx) => {
+      const targetCount = weekdayTargetHeadcount[d.dayOfWeek] ?? fallbackDailyTarget;
+      const remainingDaysAfterToday = totalDays - 1 - dayIdx;
+
+      const mustTakeOffToday = [];
+      const eligibleForWorkToday = [];
+
+      autoStoreStaff.forEach((stf) => {
+        const needOff = redDayCountInMonth - offCountByStaff[stf.id];
+        if (needOff > 0 && needOff >= remainingDaysAfterToday + 1) {
+          mustTakeOffToday.push(stf);
+          return;
+        }
+        if (isConsecutiveTwoDaysWork(stf.id, dayIdx)) {
+          return;
+        }
+        eligibleForWorkToday.push(stf);
+      });
+
+      mustTakeOffToday.forEach((stf) => {
+        draft[d.dateStr + '_' + stf.id] = '휴무';
+        offCountByStaff[stf.id] += 1;
+      });
+
+      const availableSlots = Math.max(0, autoStoreStaff.length - mustTakeOffToday.length);
+      const desiredWorkCount = Math.min(targetCount, availableSlots);
+
+      const chosenWorkers = [];
+      const remainingPool = [...eligibleForWorkToday];
+
+      while (chosenWorkers.length < desiredWorkCount && remainingPool.length > 0) {
+        let bestIdx = 0;
+        let bestScore = -Infinity;
+
+        remainingPool.forEach((cand, idx) => {
+          let synergyScore = 0;
+          chosenWorkers.forEach((cw) => {
+            synergyScore += getPairAvg(cand.id, cw.id) * 1.5;
+          });
+          const fairnessPenalty = workCountByStaff[cand.id] * 500;
+          const totalScore = synergyScore - fairnessPenalty;
+          if (totalScore > bestScore) {
+            bestScore = totalScore;
+            bestIdx = idx;
+          }
+        });
+
+        const [picked] = remainingPool.splice(bestIdx, 1);
+        chosenWorkers.push(picked);
+      }
+
+      chosenWorkers.forEach((worker) => {
+        const prevGrp = lastGroupByStaff[worker.id];
+        const rotGrp = AUTO_WORK_GROUPS[groupRotationIdx[worker.id] % AUTO_WORK_GROUPS.length];
+        const candidateGroups =
+          prevGrp === 'A조' ? ['C조', 'A조'] : ['A조', 'C조'];
+
+        let selectedGroup = candidateGroups[0];
+        if (candidateGroups.includes(rotGrp) && candidateGroups[0] !== rotGrp) {
+          const scoreFirst = getStaffGroupAvg(worker.id, candidateGroups[0]);
+          const scoreRot = getStaffGroupAvg(worker.id, rotGrp);
+          selectedGroup = scoreRot > scoreFirst * 1.15 ? rotGrp : candidateGroups[0];
+        } else {
+          const scoreFirst = getStaffGroupAvg(worker.id, candidateGroups[0]);
+          const scoreSecond = getStaffGroupAvg(worker.id, candidateGroups[1]);
+          if (scoreSecond > scoreFirst * 1.2) {
+            selectedGroup = candidateGroups[1];
+          }
+        }
+
+        draft[d.dateStr + '_' + worker.id] = selectedGroup;
+        lastGroupByStaff[worker.id] = selectedGroup;
+        groupRotationIdx[worker.id] = (groupRotationIdx[worker.id] + 1) % AUTO_WORK_GROUPS.length;
+        workCountByStaff[worker.id] += 1;
+      });
+
+      autoStoreStaff.forEach((stf) => {
+        const key = d.dateStr + '_' + stf.id;
+        if (draft[key]) return;
+        const needOff = redDayCountInMonth - offCountByStaff[stf.id];
+        if (needOff > 0) {
+          draft[key] = '휴무';
+          offCountByStaff[stf.id] += 1;
+        } else {
+          draft[key] = '';
+        }
+      });
+    });
+
+    setAutoDraftSchedule(draft);
+    setAutoAnalysisMeta({
+      storeId: effectiveAutoStoreId,
+      storeName: autoStoreObj?.name || '',
+      prevMonthLabel: prevYear + '년 ' + (prevMonth + 1) + '월',
+      hasPrevData,
+      weekdayTargetHeadcount,
+      redDayCountInMonth,
+      topPairs: topPairsSummary.slice(0, 5),
+      workCountByStaff,
+      offCountByStaff
+    });
+  };
+
+  const handleApplyAutoScheduleToMain = () => {
+    if (!autoAnalysisMeta || Object.keys(autoDraftSchedule).length === 0) return;
+    const targetStId = autoAnalysisMeta.storeId;
+    const approval = getStoreApprovalInfo(targetStId);
+
+    if (!isAdmin) {
+      if (!isManager || targetStId !== activeStaffProfile?.storeId) {
+        alert('스케줄 반영은 본사 관리자와 해당 매장 매니저만 가능합니다.');
+        return;
+      }
+      if (approval.status === 'APPROVED') {
+        alert('이미 관리자 승인이 완료된 스케줄입니다. 변경하려면 관리자에게 승인 해제를 요청하세요.');
+        return;
+      }
+      if (approval.status === 'PENDING') {
+        alert('현재 관리자 승인 심사 중입니다.');
+        return;
+      }
+    }
+
+    if (
+      !window.confirm(
+        autoAnalysisMeta.storeName +
+          '의 ' +
+          year +
+          '년 ' +
+          (month + 1) +
+          '월 자동 추천 스케줄을 실제 스케줄표에 반영하시겠습니까?'
+      )
+    ) {
+      return;
+    }
+
+    const updated = { ...schedules };
+    daysInMonth.forEach((d) => {
+      autoStoreStaff.forEach((stf) => {
+        const key = d.dateStr + '_' + stf.id;
+        if (Object.prototype.hasOwnProperty.call(autoDraftSchedule, key)) {
+          const val = autoDraftSchedule[key];
+          if (val) {
+            updated[key] = val;
+          } else {
+            delete updated[key];
+          }
+        }
+      });
+    });
+
+    setSchedules(updated);
+    saveToCloud({ schedules: updated });
+    alert('자동 추천 스케줄이 당월 스케줄표에 반영되었습니다.');
+    setActiveTab('schedule');
+  };
+
   const visibleStaff = useMemo(() => {
     if (currentUser?.role === 'staff' && activeStaffProfile) {
       return staffList.filter((s) => s.storeId === activeStaffProfile.storeId && s.status !== 'RESIGNED');
@@ -1447,6 +1796,14 @@ export default function App() {
             )}
           </button>
           <button
+            onClick={() => setActiveTab('auto_schedule')}
+            className={activeTab === 'auto_schedule'
+              ? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+              : 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+          >
+            <Sparkles className="w-4 h-4" />매장별 자동 스케줄표
+          </button>
+          <button
             onClick={() => setActiveTab('sales')}
             className={activeTab === 'sales'
               ? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
@@ -1508,7 +1865,12 @@ export default function App() {
               <span className="text-xs font-semibold text-slate-500">지점 필터:</span>
               <select
                 value={selectedStoreId}
-                onChange={(e) => setSelectedStoreId(e.target.value)}
+                onChange={(e) => {
+                  setSelectedStoreId(e.target.value);
+                  if (e.target.value !== 'ALL') {
+                    setAutoTargetStoreId(e.target.value);
+                  }
+                }}
                 className="text-xs sm:text-sm border border-slate-300 rounded-lg px-3 py-1.5 bg-white font-medium"
               >
                 <option value="ALL">전체 7개 매장 보기</option>
@@ -1731,6 +2093,202 @@ export default function App() {
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+
+        {activeTab === 'auto_schedule' && (
+          <div className="space-y-5">
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h2 className="font-bold text-base flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-indigo-600" />
+                    {year}년 {month + 1}월 매장별 자동 스케줄표 추천
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1">
+                    전월 요일별 평균 출근 인원 · 동반 출근 매출 시너지 최대화 · <strong>A조/C조 순환</strong> · <strong>연차/반차 생략</strong> · 당월 빨강날(일요일 <strong>{redDayCountInMonth}일</strong>)만큼 휴무 배정 · <strong>3일 연속 근무 금지</strong> 규칙으로 추천표를 생성합니다.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {isAdmin ? (
+                    <select
+                      value={effectiveAutoStoreId}
+                      onChange={(e) => {
+                        setAutoTargetStoreId(e.target.value);
+                        setAutoDraftSchedule({});
+                        setAutoAnalysisMeta(null);
+                      }}
+                      className="border border-slate-300 rounded-lg px-3 py-2 text-xs sm:text-sm font-semibold bg-white"
+                    >
+                      {stores.map((st) => (
+                        <option key={st.id} value={st.id}>{st.name}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-xs sm:text-sm font-bold text-slate-700">
+                      {autoStoreObj?.name}
+                    </span>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleGenerateAutoSchedule}
+                    className="px-4 py-2 rounded-lg text-xs sm:text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white inline-flex items-center gap-1.5 shadow-sm"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    자동 스케줄 생성
+                  </button>
+
+                  {Object.keys(autoDraftSchedule).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleApplyAutoScheduleToMain}
+                      className="px-4 py-2 rounded-lg text-xs sm:text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white inline-flex items-center gap-1.5 shadow-sm"
+                    >
+                      <Check className="w-4 h-4" />
+                      당월 스케줄표에 적용
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {autoAnalysisMeta && (
+                <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
+                  <div className="bg-slate-50 rounded-xl p-3.5 border border-slate-200">
+                    <div className="font-bold text-slate-800 mb-1.5">
+                      1. {autoAnalysisMeta.prevMonthLabel} 요일별 목표 출근 인원
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {['일', '월', '화', '수', '목', '금', '토'].map((label, idx) => (
+                        <span
+                          key={label}
+                          className="px-2 py-1 rounded-md bg-white border border-slate-200 font-semibold text-slate-700"
+                        >
+                          {label}: <strong className="text-indigo-700">{autoAnalysisMeta.weekdayTargetHeadcount[idx]}명</strong>
+                        </span>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-2">
+                      {autoAnalysisMeta.hasPrevData
+                        ? '전월 요일별 평균 출근 인원을 기준으로 산출했습니다.'
+                        : '전월 출근 기록이 없어 재직 인원 기준 기본 목표를 적용했습니다.'}
+                    </p>
+                  </div>
+
+                  <div className="bg-slate-50 rounded-xl p-3.5 border border-slate-200">
+                    <div className="font-bold text-slate-800 mb-1.5">
+                      2. 고성과 동반 출근 조합 (케미 순위)
+                    </div>
+                    {autoAnalysisMeta.topPairs.length > 0 ? (
+                      <ul className="space-y-1 text-slate-700">
+                        {autoAnalysisMeta.topPairs.map((p, idx) => (
+                          <li key={p.names} className="flex justify-between items-center">
+                            <span className="font-semibold">{idx + 1}위. {p.names}</span>
+                            <span className="text-indigo-700 font-mono font-bold">
+                              {formatUsd(p.avgSales)} ({p.daysCount}일)
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-[11px] text-slate-500">
+                        동반 출근 매출 이력이 쌓이면 고성과 조합이 우선 배정됩니다.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="bg-slate-50 rounded-xl p-3.5 border border-slate-200">
+                    <div className="font-bold text-slate-800 mb-1.5">
+                      3. 적용 제약 조건 요약
+                    </div>
+                    <ul className="space-y-1 text-slate-700">
+                      <li>• 근무 조: <strong>A조, C조 순환 배정</strong> (B/F조 미사용)</li>
+                      <li>• 휴가 항목: <strong>연차·반차 생략</strong> (추후 승인 반영)</li>
+                      <li>• 휴무 일수: 당월 빨강날 기준 <strong>{autoAnalysisMeta.redDayCountInMonth}일 휴무</strong></li>
+                      <li>• 연속 근무: <strong>최대 2일 연속 근무</strong> (3일 연속 금지)</li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {Object.keys(autoDraftSchedule).length > 0 ? (
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm sm:text-base">
+                      {autoAnalysisMeta?.storeName} · {year}년 {month + 1}월 추천 스케줄 미리보기
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      출근(A조/C조) 및 휴무 일수가 조건에 맞게 산출되었습니다. 확인 후 상단의 [당월 스케줄표에 적용]을 클릭하세요.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-100 border-b border-slate-200">
+                        <th className="sticky left-0 z-20 bg-slate-100 px-3 py-2.5 text-left font-bold text-slate-700 min-w-[155px] border-r border-slate-200">
+                          성명 (근무/휴무)
+                        </th>
+                        {daysInMonth.map((d) => (
+                          <th
+                            key={d.dateStr}
+                            className={d.dayOfWeek === 0
+                              ? 'px-1.5 py-2 text-center min-w-[54px] border-r border-slate-200 text-rose-600 bg-rose-50/60'
+                              : d.dayOfWeek === 6
+                              ? 'px-1.5 py-2 text-center min-w-[54px] border-r border-slate-200 text-blue-600 bg-blue-50/60'
+                              : 'px-1.5 py-2 text-center min-w-[54px] border-r border-slate-200 text-slate-700'}
+                          >
+                            <div className="font-bold">{d.day}</div>
+                            <div className="text-[10px] font-normal">{d.dayName}</div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {autoStoreStaff.map((stf) => {
+                        const wCnt = autoAnalysisMeta?.workCountByStaff?.[stf.id] ?? 0;
+                        const oCnt = autoAnalysisMeta?.offCountByStaff?.[stf.id] ?? 0;
+                        return (
+                          <tr key={stf.id} className="border-b border-slate-100 hover:bg-slate-50/70">
+                            <td className="sticky left-0 z-10 bg-white px-3 py-2 border-r border-slate-200">
+                              <div className="font-bold text-slate-800">
+                                {stf.name} <span className="text-[10px] font-normal text-slate-500">({stf.role})</span>
+                              </div>
+                              <div className="text-[10px] text-indigo-700 font-semibold">
+                                출근 {wCnt}일 · 휴무 {oCnt}일
+                              </div>
+                            </td>
+                            {daysInMonth.map((d) => {
+                              const code = autoDraftSchedule[d.dateStr + '_' + stf.id] || '';
+                              const shiftMeta = SHIFT_TYPES.find((s) => s.code === code);
+                              return (
+                                <td key={d.dateStr} className="p-1 text-center border-r border-slate-100">
+                                  <span
+                                    className={shiftMeta
+                                      ? 'inline-block w-full py-1 rounded text-[11px] font-semibold border ' + shiftMeta.color
+                                      : 'inline-block w-full py-1 rounded text-[11px] font-semibold text-slate-300'}
+                                  >
+                                    {code || '-'}
+                                  </span>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl border border-dashed border-slate-300 p-10 text-center text-slate-500 text-xs sm:text-sm">
+                매장을 선택한 뒤 <strong>[자동 스케줄 생성]</strong> 버튼을 누르면 전월 출근 패턴과 동반 출근 매출 시너지를 분석해 추천 스케줄표를 보여줍니다.
+              </div>
+            )}
           </div>
         )}
 
