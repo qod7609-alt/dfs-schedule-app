@@ -78,6 +78,32 @@ const DEFAULT_STAFF = [
   { id: 'staff_34', name: '장은선', storeId: 'store_7', role: '아르바이트', pin: '7775', annualLeave: 4, grantedLeave: 4, hireDate: '2025-07-01', status: 'ACTIVE' }
 ];
 
+const FIXED_HOLIDAYS = new Set([
+  '2025-01-01', '2025-01-28', '2025-01-29', '2025-01-30', '2025-03-01', '2025-03-03',
+  '2025-05-05', '2025-05-06', '2025-06-06', '2025-08-15', '2025-10-03', '2025-10-05',
+  '2025-10-06', '2025-10-07', '2025-10-08', '2025-10-09', '2025-12-25',
+  '2026-01-01', '2026-02-16', '2026-02-17', '2026-02-18', '2026-03-01', '2026-03-02',
+  '2026-05-05', '2026-05-24', '2026-05-25', '2026-06-06', '2026-08-15', '2026-08-17',
+  '2026-09-24', '2026-09-25', '2026-09-26', '2026-10-03', '2026-10-05', '2026-10-09',
+  '2026-12-25',
+  '2027-01-01', '2027-02-06', '2027-02-07', '2027-02-08', '2027-02-09', '2027-03-01',
+  '2027-05-05', '2027-05-13', '2027-06-06', '2027-08-15', '2027-08-16', '2027-09-14',
+  '2027-09-15', '2027-09-16', '2027-10-03', '2027-10-04', '2027-10-09', '2027-10-11',
+  '2027-12-25'
+]);
+
+const isRedDayDateStr = (dateStr, dayOfWeek) => {
+  return dayOfWeek === 0 || dayOfWeek === 6 || FIXED_HOLIDAYS.has(dateStr);
+};
+
+const isStaffHiddenOnDate = (staff, dateStr) => {
+  if (!staff || !dateStr) return false;
+  if (staff.status === 'RESIGNED' && staff.resignedAt) {
+    return dateStr > staff.resignedAt;
+  }
+  return false;
+};
+
 const WORK_GROUPS = ['A조', 'B조', 'C조', 'F조'];
 const AUTO_WORK_GROUPS = ['A조', 'C조'];
 const ROLE_OPTIONS = ['TF팀장', '슈퍼바이저', '매니저', '시니어', '사원', '아르바이트'];
@@ -214,6 +240,9 @@ export default function App() {
   const [autoAnalysisMeta, setAutoAnalysisMeta] = useState(null);
   const [autoNotice, setAutoNotice] = useState('');
 
+  const [resignModalStaff, setResignModalStaff] = useState(null);
+  const [resignDateInput, setResignDateInput] = useState('2026-11-27');
+
   useEffect(() => {
     let unsubscribeSnapshot = null;
     const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
@@ -322,20 +351,37 @@ export default function App() {
       const yyyy = d.getFullYear();
       const mm = String(d.getMonth() + 1).padStart(2, '0');
       const dd = String(d.getDate()).padStart(2, '0');
+      const dateStr = yyyy + '-' + mm + '-' + dd;
+      const dayOfWeek = d.getDay();
       const dayNames = ['일', '월', '화', '수', '목', '금', '토'];
       return {
-        dateStr: yyyy + '-' + mm + '-' + dd,
+        dateStr,
         day: i + 1,
-        dayOfWeek: d.getDay(),
-        dayName: dayNames[d.getDay()]
+        dayOfWeek,
+        dayName: dayNames[dayOfWeek],
+        isRedDay: isRedDayDateStr(dateStr, dayOfWeek)
       };
     });
   }, [year, month]);
+
+  const monthRedDayCount = useMemo(
+    () => daysInMonth.filter((d) => d.isRedDay).length,
+    [daysInMonth]
+  );
 
   const activeStaffList = useMemo(
     () => staffList.filter((s) => s.status !== 'RESIGNED'),
     [staffList]
   );
+
+  const scheduleVisibleStaffList = useMemo(() => {
+    return staffList.filter((stf) => {
+      if (stf.status !== 'RESIGNED') return true;
+      if (!stf.resignedAt) return false;
+      const resignMonthPrefix = String(stf.resignedAt).slice(0, 7);
+      return resignMonthPrefix >= currentMonthPrefix;
+    });
+  }, [staffList, currentMonthPrefix]);
 
   const leaveSummaryByStaff = useMemo(() => {
     const map = {};
@@ -479,8 +525,8 @@ export default function App() {
     return getStoreApprovalInfo(storeId).status === 'PENDING';
   };
 
-  const canEditScheduleForStaff = (staff) => {
-    if (staff.status === 'RESIGNED') return false;
+  const canEditScheduleForStaff = (staff, dateStr) => {
+    if (isStaffHiddenOnDate(staff, dateStr)) return false;
     if (isAdmin) return true;
     if (!isManager || staff.storeId !== activeStaffProfile?.storeId) return false;
     const st = getStoreApprovalInfo(staff.storeId).status;
@@ -488,8 +534,8 @@ export default function App() {
   };
 
   const handleScheduleChange = (dateStr, staff, shiftCode) => {
-    if (staff.status === 'RESIGNED') {
-      alert('퇴사 처리된 직원의 스케줄은 수정할 수 없습니다.');
+    if (isStaffHiddenOnDate(staff, dateStr)) {
+      alert('퇴사일 이후 날짜의 스케줄은 수정할 수 없습니다.');
       return;
     }
     if (!isAdmin) {
@@ -752,44 +798,6 @@ export default function App() {
     alert('개인 PIN 번호가 변경되었습니다.');
   };
 
-  const [newAdminName, setNewAdminName] = useState('');
-  const [newAdminAccountPin, setNewAdminAccountPin] = useState('');
-
-  const handleAddAdminAccount = (e) => {
-    e.preventDefault();
-    if (!newAdminName.trim() || !/^\d{4}$/.test(newAdminAccountPin)) {
-      alert('관리자 이름과 4자리 PIN 번호를 확인해 주세요.');
-      return;
-    }
-    const addedAdmin = {
-      id: 'admin_' + Date.now(),
-      name: newAdminName.trim(),
-      pin: newAdminAccountPin
-    };
-    const updatedAdmins = [...adminAccounts, addedAdmin];
-    setAdminAccounts(updatedAdmins);
-    saveToCloud({ adminAccounts: updatedAdmins });
-    setNewAdminName('');
-    setNewAdminAccountPin('');
-    alert('새 관리자 계정이 추가되었습니다.');
-  };
-
-  const handleResetAdminAccountPin = (adminId, name) => {
-    const nextPin = window.prompt(name + ' 관리자의 새 PIN 번호 4자리를 입력하세요:', '0000');
-    if (!nextPin || !/^\d{4}$/.test(nextPin)) return;
-    const updatedAdmins = adminAccounts.map((a) => (a.id === adminId ? { ...a, pin: nextPin } : a));
-    setAdminAccounts(updatedAdmins);
-    saveToCloud({ adminAccounts: updatedAdmins });
-    alert('관리자 PIN이 변경되었습니다.');
-  };
-
-  const handleDeleteAdminAccount = (adminId, name) => {
-    if (!window.confirm(name + ' 관리자 계정을 삭제하시겠습니까?')) return;
-    const updatedAdmins = adminAccounts.filter((a) => a.id !== adminId);
-    setAdminAccounts(updatedAdmins);
-    saveToCloud({ adminAccounts: updatedAdmins });
-  };
-
   const [newStaffName, setNewStaffName] = useState('');
   const [newStaffStore, setNewStaffStore] = useState('store_1');
   const [newStaffRole, setNewStaffRole] = useState('사원');
@@ -898,13 +906,38 @@ export default function App() {
     saveToCloud({ staffList: updated });
   };
 
-  const handleResignStaff = (id, name) => {
-    if (!window.confirm(name + ' 직원을 퇴사 처리하시겠습니까?')) return;
-    const updated = staffList.map((s) =>
-      s.id === id ? { ...s, status: 'RESIGNED', resignedAt: '2026-11-27' } : s
+  const openResignModal = (stf) => {
+    setResignModalStaff(stf);
+    setResignDateInput(stf.resignedAt || '2026-11-27');
+  };
+
+  const handleConfirmResignStaff = (e) => {
+    e.preventDefault();
+    if (!resignModalStaff || !resignDateInput) return;
+
+    const targetId = resignModalStaff.id;
+    const cleanSchedules = Object.fromEntries(
+      Object.entries(schedules).filter(([key]) => {
+        const parsed = parseScheduleKey(key);
+        if (!parsed || parsed.staffId !== targetId) return true;
+        return parsed.dateStr <= resignDateInput;
+      })
     );
-    setStaffList(updated);
-    saveToCloud({ staffList: updated });
+
+    const updatedStaff = staffList.map((s) =>
+      s.id === targetId
+        ? {
+            ...s,
+            status: 'RESIGNED',
+            resignedAt: resignDateInput
+          }
+        : s
+    );
+
+    setSchedules(cleanSchedules);
+    setStaffList(updatedStaff);
+    saveToCloud({ schedules: cleanSchedules, staffList: updatedStaff });
+    setResignModalStaff(null);
   };
 
   const handleReinstateStaff = (id, name) => {
@@ -970,11 +1003,11 @@ export default function App() {
 
   const visibleStaff = useMemo(() => {
     if (currentUser?.role === 'staff' && activeStaffProfile) {
-      return staffList.filter((s) => s.storeId === activeStaffProfile.storeId && s.status !== 'RESIGNED');
+      return scheduleVisibleStaffList.filter((s) => s.storeId === activeStaffProfile.storeId);
     }
-    if (selectedStoreId === 'ALL') return activeStaffList;
-    return activeStaffList.filter((s) => s.storeId === selectedStoreId);
-  }, [currentUser, activeStaffProfile, selectedStoreId, staffList, activeStaffList]);
+    if (selectedStoreId === 'ALL') return scheduleVisibleStaffList;
+    return scheduleVisibleStaffList.filter((s) => s.storeId === selectedStoreId);
+  }, [currentUser, activeStaffProfile, selectedStoreId, scheduleVisibleStaffList]);
 
   const scheduleSummaryByStaff = useMemo(() => {
     const map = {};
@@ -983,6 +1016,7 @@ export default function App() {
       let offDays = 0;
       let leaveUsed = 0;
       daysInMonth.forEach((d) => {
+        if (isStaffHiddenOnDate(stf, d.dateStr)) return;
         const code = schedules[d.dateStr + '_' + stf.id] || '';
         if (WORK_GROUPS.includes(code)) {
           workDays += 1;
@@ -1017,7 +1051,9 @@ export default function App() {
     const rows = visibleStaff.map((stf) => {
       const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
       const rem = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
-      const dayCells = daysInMonth.map((d) => schedules[d.dateStr + '_' + stf.id] || '');
+      const dayCells = daysInMonth.map((d) =>
+        isStaffHiddenOnDate(stf, d.dateStr) ? '' : schedules[d.dateStr + '_' + stf.id] || ''
+      );
       const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, offDays: 0, leaveUsed: 0 };
       return [stName, stf.name, stf.role, rem, ...dayCells, sum.workDays, sum.offDays, sum.leaveUsed];
     });
@@ -1174,6 +1210,7 @@ export default function App() {
 
       const workingOnDay = staffList.filter((stf) => {
         if (stf.storeId !== storeId) return false;
+        if (isStaffHiddenOnDate(stf, dateStr)) return false;
         const shift = schedules[dateStr + '_' + stf.id];
         return WORK_GROUPS.includes(shift);
       });
@@ -1320,13 +1357,11 @@ export default function App() {
   );
 
   const autoStoreStaff = useMemo(
-    () => staffList.filter((s) => s.storeId === effectiveAutoStoreId && s.status !== 'RESIGNED'),
-    [staffList, effectiveAutoStoreId]
-  );
-
-  const redDayCountInMonth = useMemo(
-    () => daysInMonth.filter((d) => d.dayOfWeek === 0).length,
-    [daysInMonth]
+    () =>
+      scheduleVisibleStaffList.filter(
+        (s) => s.storeId === effectiveAutoStoreId && (!s.resignedAt || s.resignedAt >= currentMonthPrefix + '-01')
+      ),
+    [scheduleVisibleStaffList, effectiveAutoStoreId, currentMonthPrefix]
   );
 
   const handleGenerateAutoSchedule = () => {
@@ -1340,7 +1375,7 @@ export default function App() {
       setAutoAnalysisMeta(null);
       setAutoNotice(
         (autoStoreObj?.name || '선택한 매장') +
-          '에 배정된 재직 사원이 없습니다. [관리자 · 직원 · 연차 · PIN] 탭에서 직원을 추가하거나 명단을 동기화해 주세요.'
+          '에 배정된 대상 사원이 없습니다. [관리자 · 직원 · 연차 · PIN] 탭에서 직원을 확인해 주세요.'
       );
       return;
     }
@@ -1363,6 +1398,7 @@ export default function App() {
 
       let countOnDay = 0;
       autoStoreStaff.forEach((stf) => {
+        if (isStaffHiddenOnDate(stf, dtStr)) return;
         const shift = schedules[dtStr + '_' + stf.id];
         if (WORK_GROUPS.includes(shift)) {
           countOnDay += 1;
@@ -1374,7 +1410,7 @@ export default function App() {
     const hasPrevData = prevWeekdayWorkCounts.some((arr) => arr.some((c) => c > 0));
     const fallbackDailyTarget = Math.max(
       1,
-      Math.min(autoStoreStaff.length, Math.ceil(autoStoreStaff.length * 0.65))
+      Math.min(autoStoreStaff.length, Math.ceil(autoStoreStaff.length * 0.7))
     );
 
     const weekdayTargetHeadcount = prevWeekdayWorkCounts.map((arr) => {
@@ -1404,9 +1440,10 @@ export default function App() {
       const daySales = Number(rec.amount) || 0;
       if (daySales <= 0) return;
 
-      const workingToday = autoStoreStaff.filter((stf) =>
-        WORK_GROUPS.includes(schedules[dtStr + '_' + stf.id])
-      );
+      const workingToday = autoStoreStaff.filter((stf) => {
+        if (isStaffHiddenOnDate(stf, dtStr)) return false;
+        return WORK_GROUPS.includes(schedules[dtStr + '_' + stf.id]);
+      });
       if (workingToday.length === 0) return;
 
       workingToday.forEach((stf) => {
@@ -1465,8 +1502,15 @@ export default function App() {
     const leaveCountByStaff = {};
     const lastGroupByStaff = {};
     const groupRotationIdx = {};
+    const activeDaysByStaff = {};
+    const targetOffByStaff = {};
 
     autoStoreStaff.forEach((stf, idx) => {
+      const validDays = daysInMonth.filter((d) => !isStaffHiddenOnDate(stf, d.dateStr));
+      activeDaysByStaff[stf.id] = validDays.length;
+      const validRedDays = validDays.filter((d) => d.isRedDay).length;
+      targetOffByStaff[stf.id] = Math.min(validRedDays, validDays.length);
+
       offCountByStaff[stf.id] = 0;
       workCountByStaff[stf.id] = 0;
       leaveCountByStaff[stf.id] = 0;
@@ -1494,20 +1538,27 @@ export default function App() {
       const eligibleForWorkToday = [];
 
       autoStoreStaff.forEach((stf) => {
+        if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+
         const existingShift = schedules[d.dateStr + '_' + stf.id];
         if (existingShift === '연차' || existingShift === '반차') {
           draft[d.dateStr + '_' + stf.id] = existingShift;
           leaveCountByStaff[stf.id] += getLeaveCost(existingShift);
           return;
         }
-        const needOff = redDayCountInMonth - offCountByStaff[stf.id];
+
+        const goalOff = targetOffByStaff[stf.id] ?? monthRedDayCount;
+        const needOff = goalOff - offCountByStaff[stf.id];
+
         if (needOff > 0 && needOff >= remainingDaysAfterToday + 1) {
           mustTakeOffToday.push(stf);
           return;
         }
+
         if (isConsecutiveTwoDaysWork(stf.id, dayIdx)) {
           return;
         }
+
         eligibleForWorkToday.push(stf);
       });
 
@@ -1566,14 +1617,50 @@ export default function App() {
       });
 
       autoStoreStaff.forEach((stf) => {
+        if (isStaffHiddenOnDate(stf, d.dateStr)) return;
         const key = d.dateStr + '_' + stf.id;
         if (draft[key]) return;
-        const needOff = redDayCountInMonth - offCountByStaff[stf.id];
+        const goalOff = targetOffByStaff[stf.id] ?? monthRedDayCount;
+        const needOff = goalOff - offCountByStaff[stf.id];
         if (needOff > 0) {
           draft[key] = '휴무';
           offCountByStaff[stf.id] += 1;
-        } else {
-          draft[key] = '';
+        }
+      });
+    });
+
+    autoStoreStaff.forEach((stf) => {
+      const goalOff = targetOffByStaff[stf.id] ?? monthRedDayCount;
+      for (let dayIdx = daysInMonth.length - 1; dayIdx >= 0; dayIdx--) {
+        if (offCountByStaff[stf.id] >= goalOff) break;
+        const d = daysInMonth[dayIdx];
+        if (isStaffHiddenOnDate(stf, d.dateStr)) continue;
+        const key = d.dateStr + '_' + stf.id;
+        const cur = draft[key];
+        if (!cur || AUTO_WORK_GROUPS.includes(cur)) {
+          if (AUTO_WORK_GROUPS.includes(cur)) {
+            workCountByStaff[stf.id] = Math.max(0, workCountByStaff[stf.id] - 1);
+          }
+          draft[key] = '휴무';
+          offCountByStaff[stf.id] += 1;
+        }
+      }
+
+      daysInMonth.forEach((d, dayIdx) => {
+        if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+        const key = d.dateStr + '_' + stf.id;
+        if (!draft[key]) {
+          const prevGrp = lastGroupByStaff[stf.id];
+          const nextGrp = isConsecutiveTwoDaysWork(stf.id, dayIdx)
+            ? prevGrp === 'A조'
+              ? 'C조'
+              : 'A조'
+            : prevGrp === 'A조'
+            ? 'C조'
+            : 'A조';
+          draft[key] = nextGrp;
+          lastGroupByStaff[stf.id] = nextGrp;
+          workCountByStaff[stf.id] += 1;
         }
       });
     });
@@ -1585,11 +1672,12 @@ export default function App() {
       prevMonthLabel: prevYear + '년 ' + (prevMonth + 1) + '월',
       hasPrevData,
       weekdayTargetHeadcount,
-      redDayCountInMonth,
+      redDayCountInMonth: monthRedDayCount,
       topPairs: topPairsSummary.slice(0, 5),
       workCountByStaff,
       offCountByStaff,
-      leaveCountByStaff
+      leaveCountByStaff,
+      targetOffByStaff
     });
     setAutoNotice(
       (autoStoreObj?.name || '') +
@@ -1597,11 +1685,9 @@ export default function App() {
         year +
         '년 ' +
         (month + 1) +
-        '월 추천 스케줄(' +
-        autoStoreStaff.length +
-        '명 · 휴무 ' +
-        redDayCountInMonth +
-        '일 기준)이 생성되었습니다.'
+        '월 추천 스케줄(토·일·공휴일 ' +
+        monthRedDayCount +
+        '일 기준 휴무 배정 및 나머지 일자 근무 배정 완료)이 생성되었습니다.'
     );
   };
 
@@ -1611,6 +1697,7 @@ export default function App() {
       let aCount = 0;
       let cCount = 0;
       autoStoreStaff.forEach((stf) => {
+        if (isStaffHiddenOnDate(stf, d.dateStr)) return;
         const code = autoDraftSchedule[d.dateStr + '_' + stf.id];
         if (code === 'A조') aCount += 1;
         else if (code === 'C조') cCount += 1;
@@ -1661,6 +1748,10 @@ export default function App() {
     daysInMonth.forEach((d) => {
       autoStoreStaff.forEach((stf) => {
         const key = d.dateStr + '_' + stf.id;
+        if (isStaffHiddenOnDate(stf, d.dateStr)) {
+          delete updated[key];
+          return;
+        }
         if (Object.prototype.hasOwnProperty.call(autoDraftSchedule, key)) {
           const val = autoDraftSchedule[key];
           if (val) updated[key] = val;
@@ -1680,6 +1771,7 @@ export default function App() {
     daysInMonth.forEach((d) => {
       const counts = { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0, total: 0 };
       visibleStaff.forEach((stf) => {
+        if (isStaffHiddenOnDate(stf, d.dateStr)) return;
         const shift = schedules[d.dateStr + '_' + stf.id];
         if (WORK_GROUPS.includes(shift)) {
           counts[shift] += 1;
@@ -1992,7 +2084,7 @@ export default function App() {
                   )}
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  연차(1일) · 반차(0.5일) 입력 시 잔여 연차 및 우측 근무/휴무/연차 사용수가 자동 집계됩니다.
+                  퇴사일 다음 날부터는 스케줄표에서 자동으로 제외됩니다. 우측에 근무날수 · 휴무날수 · 연차 사용수가 표시됩니다.
                 </p>
                 {currentStoreRejected && currentApprovalInfo?.rejectReason && (
                   <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 mt-1.5">
@@ -2086,7 +2178,7 @@ export default function App() {
                         <th
                           key={d.dateStr}
                           className={'border-b border-r border-slate-200 px-1.5 py-2 text-center min-w-[54px] ' +
-                            (isSun ? 'text-rose-600 bg-rose-50/60' : isSat ? 'text-blue-600 bg-blue-50/40' : '')}
+                            (d.isRedDay ? 'text-rose-600 bg-rose-50/70' : isSun ? 'text-rose-600 bg-rose-50/60' : isSat ? 'text-blue-600 bg-blue-50/40' : '')}
                         >
                           <div className="font-bold">{d.day}</div>
                           <div className="text-[10px]">{d.dayName}</div>
@@ -2107,7 +2199,6 @@ export default function App() {
                 <tbody>
                   {visibleStaff.map((stf) => {
                     const stName = stores.find((s) => s.id === stf.storeId)?.name || '';
-                    const editable = canEditScheduleForStaff(stf);
                     const remLeave = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
                     const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, offDays: 0, leaveUsed: 0 };
                     return (
@@ -2116,6 +2207,11 @@ export default function App() {
                           <div className="font-semibold text-slate-800 flex items-center gap-1.5">
                             <span>{stf.name}</span>
                             <span className="text-[10px] font-normal text-slate-500">{stf.role}</span>
+                            {stf.status === 'RESIGNED' && (
+                              <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-100 text-rose-700 font-bold">
+                                퇴사({stf.resignedAt})
+                              </span>
+                            )}
                           </div>
                           <div className="text-[10px] text-slate-500 flex items-center justify-between gap-1 mt-0.5">
                             <span className="truncate">{stName}</span>
@@ -2123,6 +2219,17 @@ export default function App() {
                           </div>
                         </td>
                         {daysInMonth.map((d) => {
+                          if (isStaffHiddenOnDate(stf, d.dateStr)) {
+                            return (
+                              <td
+                                key={d.dateStr}
+                                className="border-b border-r border-slate-200 p-1 text-center bg-slate-100/80 text-slate-300"
+                              >
+                                <span className="text-[10px]">-</span>
+                              </td>
+                            );
+                          }
+                          const editable = canEditScheduleForStaff(stf, d.dateStr);
                           const val = schedules[d.dateStr + '_' + stf.id] || '';
                           const shiftObj = SHIFT_TYPES.find((s) => s.code === val);
                           return (
@@ -2188,7 +2295,7 @@ export default function App() {
                     <span>{year}년 {month + 1}월 매장별 자동 스케줄표 추천</span>
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    전월 요일별 평균 출근 인원 · 동반 출근 매출 시너지 · A조/C조 순환 · 당월 일요일({redDayCountInMonth}일) 수만큼 휴무 배정 · 3일 연속 근무 금지 규칙을 적용합니다.
+                    당월 토요일·일요일·공휴일({monthRedDayCount}일) 수만큼 <strong>휴무</strong>가 배정되며, 나머지 날짜는 <strong>근무(A조/C조)</strong>로 배정됩니다. 퇴사일 이후는 자동 제외됩니다.
                   </p>
                 </div>
 
@@ -2248,7 +2355,7 @@ export default function App() {
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
                 <div className="p-4 border-b border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs text-slate-700 font-medium">
-                    <span className="font-bold text-indigo-700">{autoAnalysisMeta.storeName}</span> · 기준 휴무일: <span className="font-bold">{autoAnalysisMeta.redDayCountInMonth}일</span> · 전월({autoAnalysisMeta.prevMonthLabel}) 데이터: <span className="font-bold">{autoAnalysisMeta.hasPrevData ? '반영됨' : '기본 목표치 적용'}</span>
+                    <span className="font-bold text-indigo-700">{autoAnalysisMeta.storeName}</span> · 토·일·공휴일 기준 휴무: <span className="font-bold">{autoAnalysisMeta.redDayCountInMonth}일</span> · 전월({autoAnalysisMeta.prevMonthLabel}) 데이터: <span className="font-bold">{autoAnalysisMeta.hasPrevData ? '반영됨' : '기본 목표치 적용'}</span>
                   </div>
                   <div className="text-[11px] text-slate-500">
                     요일별 목표 출근: 일 {autoAnalysisMeta.weekdayTargetHeadcount[0]} · 월 {autoAnalysisMeta.weekdayTargetHeadcount[1]} · 화 {autoAnalysisMeta.weekdayTargetHeadcount[2]} · 수 {autoAnalysisMeta.weekdayTargetHeadcount[3]} · 목 {autoAnalysisMeta.weekdayTargetHeadcount[4]} · 금 {autoAnalysisMeta.weekdayTargetHeadcount[5]} · 토 {autoAnalysisMeta.weekdayTargetHeadcount[6]}
@@ -2280,7 +2387,7 @@ export default function App() {
                             <th
                               key={d.dateStr}
                               className={'border-b border-r border-slate-200 px-1.5 py-2 text-center min-w-[50px] ' +
-                                (isSun ? 'text-rose-600 bg-rose-50/60' : isSat ? 'text-blue-600 bg-blue-50/40' : '')}
+                                (d.isRedDay ? 'text-rose-600 bg-rose-50/70' : isSun ? 'text-rose-600 bg-rose-50/60' : isSat ? 'text-blue-600 bg-blue-50/40' : '')}
                             >
                               <div className="font-bold">{d.day}</div>
                               <div className="text-[10px]">{d.dayName}</div>
@@ -2306,9 +2413,27 @@ export default function App() {
                         return (
                           <tr key={stf.id} className="hover:bg-slate-50/70">
                             <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2">
-                              <div className="font-semibold text-slate-800">{stf.name} <span className="text-[10px] font-normal text-slate-500">{stf.role}</span></div>
+                              <div className="font-semibold text-slate-800 flex items-center gap-1 flex-wrap">
+                                <span>{stf.name}</span>
+                                <span className="text-[10px] font-normal text-slate-500">{stf.role}</span>
+                                {stf.resignedAt && (
+                                  <span className="text-[10px] px-1 rounded bg-rose-100 text-rose-700 font-bold">
+                                    퇴사 {stf.resignedAt}
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             {daysInMonth.map((d) => {
+                              if (isStaffHiddenOnDate(stf, d.dateStr)) {
+                                return (
+                                  <td
+                                    key={d.dateStr}
+                                    className="border-b border-r border-slate-200 p-1 text-center bg-slate-100/80 text-slate-300"
+                                  >
+                                    <span className="text-[10px]">-</span>
+                                  </td>
+                                );
+                              }
                               const code = autoDraftSchedule[d.dateStr + '_' + stf.id] || '';
                               const shiftObj = SHIFT_TYPES.find((s) => s.code === code);
                               return (
@@ -2740,6 +2865,7 @@ export default function App() {
                       <th className="border-b border-r border-slate-200 px-3 py-2 text-center">입사일</th>
                       <th className="border-b border-r border-slate-200 px-3 py-2 text-center">발생연차</th>
                       <th className="border-b border-r border-slate-200 px-3 py-2 text-center">잔여연차</th>
+                      <th className="border-b border-r border-slate-200 px-3 py-2 text-center">퇴사일</th>
                       <th className="border-b border-r border-slate-200 px-3 py-2 text-center">PIN</th>
                       <th className="border-b border-slate-200 px-3 py-2 text-center">관리</th>
                     </tr>
@@ -2771,13 +2897,16 @@ export default function App() {
                             />
                           </td>
                           <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-bold text-indigo-700">{formatDays(summary.remaining)}일</td>
+                          <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-mono text-rose-700">
+                            {stf.status === 'RESIGNED' ? stf.resignedAt || '-' : '-'}
+                          </td>
                           <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-mono">{stf.pin}</td>
                           <td className="border-b border-slate-200 px-3 py-2 text-center">
                             <div className="inline-flex items-center gap-1">
                               <button type="button" onClick={() => handleApplyAutoLeaveByHireDate(stf.id)} className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700">자동연차</button>
                               <button type="button" onClick={() => handleResetStaffPin(stf.id, stf.name)} className="px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700">PIN</button>
                               {stf.status !== 'RESIGNED' ? (
-                                <button type="button" onClick={() => handleResignStaff(stf.id, stf.name)} className="px-2 py-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-700">퇴사</button>
+                                <button type="button" onClick={() => openResignModal(stf)} className="px-2 py-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-700">퇴사</button>
                               ) : (
                                 <button type="button" onClick={() => handleReinstateStaff(stf.id, stf.name)} className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700">복직</button>
                               )}
@@ -2823,6 +2952,47 @@ export default function App() {
           )
         )}
       </main>
+
+      {resignModalStaff && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleConfirmResignStaff}
+            className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4"
+          >
+            <h3 className="font-bold text-base text-slate-900">
+              {resignModalStaff.name} 님 퇴사 처리
+            </h3>
+            <p className="text-xs text-slate-500">
+              입력한 <strong>퇴사일 다음 날</strong>부터 스케줄표 및 자동 스케줄에서 표시되지 않습니다.
+            </p>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">퇴사 날짜 선택</label>
+              <input
+                type="date"
+                value={resignDateInput}
+                onChange={(e) => setResignDateInput(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold"
+                required
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setResignModalStaff(null)}
+                className="px-3.5 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+              >
+                취소
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-xs font-semibold text-white"
+              >
+                퇴사 확정
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
