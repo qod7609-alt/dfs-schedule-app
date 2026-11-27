@@ -284,6 +284,7 @@ export default function App() {
   const [adminPin, setAdminPin] = useState('0000');
   const [adminAccounts, setAdminAccounts] = useState([]);
   const [stores, setStores] = useState(DEFAULT_STORES);
+  const [monthlyTargetSales, setMonthlyTargetSales] = useState({});
   const [staffList, setStaffList] = useState(DEFAULT_STAFF);
   const [schedules, setSchedules] = useState({});
   const [scheduleApprovals, setScheduleApprovals] = useState({});
@@ -333,6 +334,7 @@ export default function App() {
           if (data.adminPin) setAdminPin(data.adminPin);
           if (data.adminAccounts) setAdminAccounts(data.adminAccounts);
           if (data.stores && data.stores.length > 0) setStores(data.stores);
+          if (data.monthlyTargetSales) setMonthlyTargetSales(data.monthlyTargetSales);
           if (data.staffList && data.staffList.length > 0) setStaffList(data.staffList);
           if (data.schedules) setSchedules(data.schedules);
           if (data.scheduleApprovals) setScheduleApprovals(data.scheduleApprovals);
@@ -344,6 +346,7 @@ export default function App() {
             adminPin: '0000',
             adminAccounts: [],
             stores: DEFAULT_STORES,
+            monthlyTargetSales: {},
             staffList: DEFAULT_STAFF,
             schedules: {},
             scheduleApprovals: {},
@@ -415,6 +418,30 @@ export default function App() {
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
   const currentMonthPrefix = year + '-' + String(month + 1).padStart(2, '0');
+
+  const getStoreMonthTarget = (store, monthPrefix = currentMonthPrefix) => {
+    const storeMap = monthlyTargetSales?.[store.id];
+    if (storeMap && Object.prototype.hasOwnProperty.call(storeMap, monthPrefix)) {
+      const val = storeMap[monthPrefix];
+      if (val !== undefined && val !== null && val !== '') {
+        return Number(val) || 0;
+      }
+    }
+    return Number(store.targetSales) || 0;
+  };
+
+  const handleUpdateStoreMonthTarget = (storeId, value, monthPrefix = currentMonthPrefix) => {
+    const numVal = Math.max(0, Number(String(value).replace(/,/g, '')) || 0);
+    const updatedMonthlyTargets = {
+      ...monthlyTargetSales,
+      [storeId]: {
+        ...(monthlyTargetSales?.[storeId] || {}),
+        [monthPrefix]: numVal
+      }
+    };
+    setMonthlyTargetSales(updatedMonthlyTargets);
+    saveToCloud({ monthlyTargetSales: updatedMonthlyTargets });
+  };
 
   const daysInMonth = useMemo(() => {
     const total = new Date(year, month + 1, 0).getDate();
@@ -1096,6 +1123,7 @@ export default function App() {
       let leaveUsed = 0;
       let streak = 0;
       let maxStreak = 0;
+      const groupDays = { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0 };
 
       daysInMonth.forEach((d) => {
         if (isStaffHiddenOnDate(stf, d.dateStr)) {
@@ -1110,6 +1138,10 @@ export default function App() {
           if (isOvertimeCode(code)) {
             overtimeDays += 1;
           }
+          const base = normalizeBaseGroup(code);
+          if (base && groupDays[base] !== undefined) {
+            groupDays[base] += 1;
+          }
         } else {
           streak = 0;
           if (code === '휴무') {
@@ -1121,12 +1153,20 @@ export default function App() {
           }
         }
       });
+
+      const groupBreakdownText = BASE_WORK_GROUPS
+        .filter((g) => groupDays[g] > 0)
+        .map((g) => g + ' ' + groupDays[g] + '일')
+        .join(' · ');
+
       map[stf.id] = {
         workDays,
         overtimeDays,
         offDays,
         leaveUsed: Number(leaveUsed.toFixed(1)),
-        maxStreak
+        maxStreak,
+        groupDays,
+        groupBreakdownText: groupBreakdownText || '-'
       };
     });
     return map;
@@ -1354,7 +1394,8 @@ export default function App() {
       '근무날수',
       '연장(+)',
       '휴무날수',
-      '연차 사용수'
+      '연차 사용수',
+      '조별 근무일수'
     ];
     const rows = visibleStaff.map((stf) => {
       const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
@@ -1362,8 +1403,25 @@ export default function App() {
       const dayCells = daysInMonth.map((d) =>
         isStaffHiddenOnDate(stf, d.dateStr) ? '' : schedules[d.dateStr + '_' + stf.id] || ''
       );
-      const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, overtimeDays: 0, offDays: 0, leaveUsed: 0 };
-      return [stName, stf.name, stf.role, rem, ...dayCells, sum.workDays, sum.overtimeDays, sum.offDays, sum.leaveUsed];
+      const sum = scheduleSummaryByStaff[stf.id] || {
+        workDays: 0,
+        overtimeDays: 0,
+        offDays: 0,
+        leaveUsed: 0,
+        groupBreakdownText: '-'
+      };
+      return [
+        stName,
+        stf.name,
+        stf.role,
+        rem,
+        ...dayCells,
+        sum.workDays,
+        sum.overtimeDays,
+        sum.offDays,
+        sum.leaveUsed,
+        sum.groupBreakdownText
+      ];
     });
     const filterLabel = isAdmin
       ? selectedStoreId === 'ALL'
@@ -2444,7 +2502,7 @@ export default function App() {
                   )}
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  매장 전용 <strong>[양식 다운로드]</strong> 후 엑셀에서 근무표를 작성해 <strong>[엑셀(CSV) 업로드]</strong>로 일괄 반영할 수 있습니다.
+                  하단에는 <strong>일자별 조별 근무인원</strong>, 우측에는 <strong>인원별 조별 근무일수</strong>가 표시됩니다.
                 </p>
                 {overStreakStaffNames.length > 0 && (
                   <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 mt-1.5 font-medium">
@@ -2616,8 +2674,11 @@ export default function App() {
                     <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-slate-100 text-slate-800">
                       휴무날수
                     </th>
-                    <th className="border-b border-slate-200 px-2 py-2 text-center min-w-[68px] bg-amber-50/80 text-amber-900">
+                    <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[68px] bg-amber-50/80 text-amber-900">
                       연차 사용수
+                    </th>
+                    <th className="border-b border-slate-200 px-2.5 py-2 text-left min-w-[140px] bg-purple-50/70 text-purple-950">
+                      조별 근무일수
                     </th>
                   </tr>
                 </thead>
@@ -2625,7 +2686,14 @@ export default function App() {
                   {visibleStaff.map((stf) => {
                     const stName = stores.find((s) => s.id === stf.storeId)?.name || '';
                     const remLeave = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
-                    const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, overtimeDays: 0, offDays: 0, leaveUsed: 0, maxStreak: 0 };
+                    const sum = scheduleSummaryByStaff[stf.id] || {
+                      workDays: 0,
+                      overtimeDays: 0,
+                      offDays: 0,
+                      leaveUsed: 0,
+                      maxStreak: 0,
+                      groupBreakdownText: '-'
+                    };
                     return (
                       <tr key={stf.id} className="hover:bg-slate-50/70">
                         <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2">
@@ -2688,31 +2756,51 @@ export default function App() {
                         <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-700 bg-slate-50/60">
                           {sum.offDays}일
                         </td>
-                        <td className="border-b border-slate-200 px-2 py-2 text-center font-bold text-amber-800 bg-amber-50/40">
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-bold text-amber-800 bg-amber-50/40">
                           {formatDays(sum.leaveUsed)}일
+                        </td>
+                        <td className="border-b border-slate-200 px-2.5 py-2 text-left font-semibold text-purple-900 bg-purple-50/30 whitespace-nowrap">
+                          {sum.groupBreakdownText}
                         </td>
                       </tr>
                     );
                   })}
                 </tbody>
                 <tfoot>
-                  <tr className="bg-indigo-50/70 font-semibold text-slate-800">
-                    <td className="sticky left-0 z-10 bg-indigo-50 border-t-2 border-r border-slate-300 px-3 py-2 text-xs">
-                      일별 근무인원 (연장 포함)
+                  <tr className="bg-indigo-50/80 font-semibold text-slate-800">
+                    <td className="sticky left-0 z-10 bg-indigo-100/80 border-t-2 border-r border-slate-300 px-3 py-2 text-xs">
+                      <div className="font-bold text-slate-900">일별 조별 근무인원</div>
+                      <div className="text-[10px] text-slate-600 font-normal mt-0.5 space-y-0.5">
+                        <div>A조 · B조 · C조 · F조</div>
+                        <div className="font-bold text-indigo-800">총 출근 (연장+)</div>
+                      </div>
                     </td>
                     {daysInMonth.map((d) => {
-                      const c = dailyGroupCounts[d.dateStr] || { total: 0, overtime: 0 };
+                      const c = dailyGroupCounts[d.dateStr] || {
+                        'A조': 0,
+                        'B조': 0,
+                        'C조': 0,
+                        'F조': 0,
+                        total: 0,
+                        overtime: 0
+                      };
                       return (
-                        <td key={d.dateStr} className="border-t-2 border-r border-slate-300 px-1 py-2 text-center">
-                          <div className="text-xs font-bold text-indigo-700">{c.total}명</div>
+                        <td key={d.dateStr} className="border-t-2 border-r border-slate-300 px-1 py-1.5 text-center leading-tight">
+                          <div className="text-[10px] text-sky-800 font-semibold">A {c['A조']}</div>
+                          <div className="text-[10px] text-indigo-800 font-semibold">B {c['B조']}</div>
+                          <div className="text-[10px] text-purple-800 font-semibold">C {c['C조']}</div>
+                          <div className="text-[10px] text-cyan-800 font-semibold">F {c['F조']}</div>
+                          <div className="text-[11px] font-extrabold text-slate-900 border-t border-indigo-200 mt-0.5 pt-0.5">
+                            {c.total}명
+                          </div>
                           {c.overtime > 0 && (
                             <div className="text-[10px] font-bold text-sky-700">+{c.overtime}</div>
                           )}
                         </td>
                       );
                     })}
-                    <td colSpan={4} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-500">
-                      인원별 합계 열 참조
+                    <td colSpan={5} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-600">
+                      인원별 합계 및 조별 근무일수 열 참조
                     </td>
                   </tr>
                 </tfoot>
@@ -2969,20 +3057,35 @@ export default function App() {
             </form>
 
             <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-              <h2 className="font-bold text-base mb-3">{year}년 {month + 1}월 매장별 누적 매출(USD) · 수량 현황</h2>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <h2 className="font-bold text-base">{year}년 {month + 1}월 매장별 누적 매출(USD) · 월별 목표 현황</h2>
+                <span className="text-[11px] text-slate-500">목표 금액은 {year}년 {month + 1}월({currentMonthPrefix}) 전용으로 저장됩니다.</span>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {stores.map((st) => {
                   const sumObj = monthlySalesSummary[st.id] || { amount: 0, quantity: 0 };
-                  const achRate = st.targetSales > 0 ? Math.round((sumObj.amount / st.targetSales) * 100) : 0;
+                  const monthTarget = getStoreMonthTarget(st, currentMonthPrefix);
+                  const achRate = monthTarget > 0 ? Math.round((sumObj.amount / monthTarget) * 100) : 0;
                   return (
-                    <div key={st.id} className="border border-slate-200 rounded-xl p-4">
+                    <div key={st.id} className="border border-slate-200 rounded-xl p-4 space-y-2">
                       <div className="flex items-center justify-between">
                         <span className="font-bold text-sm">{st.name}</span>
                         <span className="text-xs font-bold text-indigo-600">{achRate}%</span>
                       </div>
-                      <div className="text-lg font-extrabold mt-1">{formatUsd(sumObj.amount)}</div>
-                      <div className="text-xs font-semibold text-emerald-700 mt-0.5">누적 판매수량: {formatQty(sumObj.quantity)} PCS</div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">월 목표: {formatUsd(st.targetSales)}</div>
+                      <div className="text-lg font-extrabold">{formatUsd(sumObj.amount)}</div>
+                      <div className="text-xs font-semibold text-emerald-700">누적 판매수량: {formatQty(sumObj.quantity)} PCS</div>
+                      <div className="pt-1 border-t border-slate-100 flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold text-slate-600 shrink-0">{month + 1}월 목표(USD):</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="100"
+                          disabled={!isAdmin && activeStaffProfile?.storeId !== st.id}
+                          value={monthTarget}
+                          onChange={(e) => handleUpdateStoreMonthTarget(st.id, e.target.value, currentMonthPrefix)}
+                          className="w-28 rounded-lg border border-slate-300 px-2 py-1 text-xs text-right font-bold text-slate-800 disabled:bg-slate-100"
+                        />
+                      </div>
                     </div>
                   );
                 })}
@@ -2993,455 +3096,1625 @@ export default function App() {
 
         {activeTab === 'daily_sales_summary' && (
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="font-bold text-base">{year}년 {month + 1}월 일별 · 매장별 매출(USD) 및 수량 합계</h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  매출 발생일({dailyStoreMatrix.activeSalesDaysCount}일) 일평균 매출: <span className="font-bold text-indigo-700">{formatUsd(dailyStoreMatrix.avgDailyAmount)}</span>
-                </p>
+return;
+}
+
+    const goalOff = targetOffByStaff[stf.id] ?? monthRedDayCount;
+    const needOff = goalOff - offCountByStaff[stf.id];
+
+    if (getPriorConsecutiveWorkDays(stf.id, dayIdx) >= 3) {
+      mustTakeOffToday.push(stf);
+      return;
+    }
+
+    if (needOff > 0 && needOff >= remainingDaysAfterToday + 1) {
+      mustTakeOffToday.push(stf);
+      return;
+    }
+
+    eligibleForWorkToday.push(stf);
+  });
+
+  mustTakeOffToday.forEach((stf) => {
+    draft[d.dateStr + '_' + stf.id] = '휴무';
+    offCountByStaff[stf.id] += 1;
+  });
+
+  const desiredWorkCount = Math.min(targetCount, eligibleForWorkToday.length);
+  const chosenWorkers = [];
+  const remainingPool = [...eligibleForWorkToday];
+
+  while (chosenWorkers.length < desiredWorkCount && remainingPool.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+
+    remainingPool.forEach((cand, idx) => {
+      let synergyScore = 0;
+      chosenWorkers.forEach((cw) => {
+        synergyScore += getPairAvg(cand.id, cw.id) * 1.5;
+      });
+      const fairnessPenalty = workCountByStaff[cand.id] * 500;
+      const totalScore = synergyScore - fairnessPenalty;
+      if (totalScore > bestScore) {
+        bestScore = totalScore;
+        bestIdx = idx;
+      }
+    });
+
+    const [picked] = remainingPool.splice(bestIdx, 1);
+    chosenWorkers.push(picked);
+  }
+
+  chosenWorkers.forEach((worker) => {
+    const prevGrp = lastGroupByStaff[worker.id];
+    const rotGrp = AUTO_WORK_GROUPS[groupRotationIdx[worker.id] % AUTO_WORK_GROUPS.length];
+    const candidateGroups = prevGrp === 'A조' ? ['C조', 'A조'] : ['A조', 'C조'];
+
+    let selectedGroup = candidateGroups[0];
+    if (candidateGroups.includes(rotGrp) && candidateGroups[0] !== rotGrp) {
+      const scoreFirst = getStaffGroupAvg(worker.id, candidateGroups[0]);
+      const scoreRot = getStaffGroupAvg(worker.id, rotGrp);
+      selectedGroup = scoreRot > scoreFirst * 1.15 ? rotGrp : candidateGroups[0];
+    } else {
+      const scoreFirst = getStaffGroupAvg(worker.id, candidateGroups[0]);
+      const scoreSecond = getStaffGroupAvg(worker.id, candidateGroups[1]);
+      if (scoreSecond > scoreFirst * 1.2) {
+        selectedGroup = candidateGroups[1];
+      }
+    }
+
+    draft[d.dateStr + '_' + worker.id] = selectedGroup;
+    lastGroupByStaff[worker.id] = selectedGroup;
+    groupRotationIdx[worker.id] = (groupRotationIdx[worker.id] + 1) % AUTO_WORK_GROUPS.length;
+    workCountByStaff[worker.id] += 1;
+  });
+
+  autoStoreStaff.forEach((stf) => {
+    if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+    const key = d.dateStr + '_' + stf.id;
+    if (draft[key]) return;
+    const goalOff = targetOffByStaff[stf.id] ?? monthRedDayCount;
+    const needOff = goalOff - offCountByStaff[stf.id];
+    if (needOff > 0) {
+      draft[key] = '휴무';
+      offCountByStaff[stf.id] += 1;
+    }
+  });
+});
+
+autoStoreStaff.forEach((stf) => {
+  const goalOff = targetOffByStaff[stf.id] ?? monthRedDayCount;
+  for (let dayIdx = daysInMonth.length - 1; dayIdx >= 0; dayIdx--) {
+    if (offCountByStaff[stf.id] >= goalOff) break;
+    const d = daysInMonth[dayIdx];
+    if (isStaffHiddenOnDate(stf, d.dateStr)) continue;
+    const key = d.dateStr + '_' + stf.id;
+    const cur = draft[key];
+    if (!cur || isWorkCode(cur)) {
+      if (isWorkCode(cur)) {
+        workCountByStaff[stf.id] = Math.max(0, workCountByStaff[stf.id] - 1);
+      }
+      draft[key] = '휴무';
+      offCountByStaff[stf.id] += 1;
+    }
+  }
+
+  daysInMonth.forEach((d, dayIdx) => {
+    if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+    const key = d.dateStr + '_' + stf.id;
+    if (!draft[key]) {
+      if (wouldExceedThreeConsecutiveWork(stf.id, dayIdx)) {
+        draft[key] = '휴무';
+        offCountByStaff[stf.id] += 1;
+      } else {
+        const prevGrp = lastGroupByStaff[stf.id];
+        const nextGrp = prevGrp === 'A조' ? 'C조' : 'A조';
+        draft[key] = nextGrp;
+        lastGroupByStaff[stf.id] = nextGrp;
+        workCountByStaff[stf.id] += 1;
+      }
+    }
+  });
+
+  daysInMonth.forEach((d, dayIdx) => {
+    if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+    const key = d.dateStr + '_' + stf.id;
+    if (isWorkCode(draft[key]) && getPriorConsecutiveWorkDays(stf.id, dayIdx) >= 3) {
+      draft[key] = '휴무';
+      workCountByStaff[stf.id] = Math.max(0, workCountByStaff[stf.id] - 1);
+      offCountByStaff[stf.id] += 1;
+    }
+  });
+});
+
+setAutoDraftSchedule(draft);
+setAutoAnalysisMeta({
+  storeId: effectiveAutoStoreId,
+  storeName: autoStoreObj?.name || '',
+  prevMonthLabel: prevYear + '년 ' + (prevMonth + 1) + '월',
+  hasPrevData,
+  weekdayTargetHeadcount,
+  redDayCountInMonth: monthRedDayCount,
+  topPairs: topPairsSummary.slice(0, 5),
+  workCountByStaff,
+  overtimeCountByStaff,
+  offCountByStaff,
+  leaveCountByStaff,
+  targetOffByStaff
+});
+setAutoNotice(
+  (autoStoreObj?.name || '') +
+    ' ' +
+    year +
+    '년 ' +
+    (month + 1) +
+    '월 추천 스케줄(최대 3일 연속 근무 제한 준수 · 토·일·공휴일 ' +
+    monthRedDayCount +
+    '일 기준 휴무 제안 완료)이 생성되었습니다.'
+);
+};
+
+const autoDailyGroupCounts = useMemo(() => {
+const result = {};
+daysInMonth.forEach((d) => {
+let aCount = 0;
+let cCount = 0;
+let otCount = 0;
+autoStoreStaff.forEach((stf) => {
+if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+const code = autoDraftSchedule[d.dateStr + '_' + stf.id];
+if (code === 'A조' || code === 'A+') aCount += 1;
+else if (code === 'C조' || code === 'C+') cCount += 1;
+if (isOvertimeCode(code)) otCount += 1;
+});
+result[d.dateStr] = {
+aCount,
+cCount,
+otCount,
+total: aCount + cCount
+};
+});
+return result;
+}, [daysInMonth, autoStoreStaff, autoDraftSchedule]);
+
+const handleApplyAutoScheduleToMain = () => {
+if (!autoAnalysisMeta || Object.keys(autoDraftSchedule).length === 0) return;
+const targetStId = autoAnalysisMeta.storeId;
+const approval = getStoreApprovalInfo(targetStId);
+
+if (!isAdmin) {
+  if (!isManager || targetStId !== activeStaffProfile?.storeId) {
+    alert('스케줄 반영은 본사 관리자와 해당 매장 매니저만 가능합니다.');
+    return;
+  }
+  if (approval.status === 'APPROVED') {
+    alert('이미 관리자 승인이 완료된 스케줄입니다.');
+    return;
+  }
+  if (approval.status === 'PENDING') {
+    alert('현재 관리자 승인 심사 중입니다.');
+    return;
+  }
+}
+
+if (
+  !window.confirm(
+    autoAnalysisMeta.storeName +
+      '의 ' +
+      year +
+      '년 ' +
+      (month + 1) +
+      '월 자동 추천 스케줄을 실제 스케줄표에 반영하시겠습니까?'
+  )
+) {
+  return;
+}
+
+const updated = { ...schedules };
+daysInMonth.forEach((d) => {
+  autoStoreStaff.forEach((stf) => {
+    const key = d.dateStr + '_' + stf.id;
+    if (isStaffHiddenOnDate(stf, d.dateStr)) {
+      delete updated[key];
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(autoDraftSchedule, key)) {
+      const val = autoDraftSchedule[key];
+      if (val) updated[key] = val;
+      else delete updated[key];
+    }
+  });
+});
+
+setSchedules(updated);
+saveToCloud({ schedules: updated });
+alert('자동 추천 스케줄이 당월 스케줄표에 반영되었습니다.');
+setActiveTab('schedule');
+};
+
+const dailyGroupCounts = useMemo(() => {
+const result = {};
+daysInMonth.forEach((d) => {
+const counts = { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0, total: 0, overtime: 0 };
+visibleStaff.forEach((stf) => {
+if (isStaffHiddenOnDate(stf, d.dateStr)) return;
+const shift = schedules[d.dateStr + '_' + stf.id];
+if (isWorkCode(shift)) {
+const base = normalizeBaseGroup(shift);
+if (base) counts[base] += 1;
+counts.total += 1;
+if (isOvertimeCode(shift)) {
+counts.overtime += 1;
+}
+}
+});
+result[d.dateStr] = counts;
+});
+return result;
+}, [daysInMonth, visibleStaff, schedules]);
+
+const leaveOverviewRows = useMemo(() => {
+return staffList
+.filter((stf) => {
+if (isAdmin) {
+return selectedStoreId === 'ALL' || stf.storeId === selectedStoreId;
+}
+return stf.storeId === activeStaffProfile?.storeId;
+})
+.map((stf) => {
+const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
+const summary = leaveSummaryByStaff[stf.id] || {
+granted: Number(stf.annualLeave ?? 0),
+used: 0,
+remaining: Number(stf.annualLeave ?? 0),
+calcInfo: null
+};
+return {
+staff: stf,
+storeName: stName,
+...summary
+};
+});
+}, [staffList, stores, isAdmin, selectedStoreId, activeStaffProfile, leaveSummaryByStaff]);
+
+if (!currentUser) {
+return (
+
+
+
+
+
+
+면세점 영업 · 스케줄 통합관리
+
+<span className={fbReady ? 'w-2 h-2 rounded-full bg-emerald-400' : 'w-2 h-2 rounded-full bg-amber-400 animate-pulse'} />
+{syncStatus}
+
+
+
+<button
+type="button"
+onClick={() => { setLoginMode('staff'); setPinInput(''); setLoginError(''); }}
+className={loginMode === 'staff'
+? 'py-3.5 text-sm font-semibold flex items-center justify-center gap-1.5 bg-white text-indigo-600 border-b-2 border-indigo-600'
+: 'py-3.5 text-sm font-semibold flex items-center justify-center gap-1.5 text-slate-500'}
+>
+판매사원 로그인
+
+<button
+type="button"
+onClick={() => { setLoginMode('admin'); setPinInput(''); setLoginError(''); }}
+className={loginMode === 'admin'
+? 'py-3.5 text-sm font-semibold flex items-center justify-center gap-1.5 bg-white text-indigo-600 border-b-2 border-indigo-600'
+: 'py-3.5 text-sm font-semibold flex items-center justify-center gap-1.5 text-slate-500'}
+>
+본사 관리자 로그인
+
+
+
+{loginMode === 'staff' ? (
+
+매장 및 성명 선택
+<select
+value={selectedStaffId}
+onChange={(e) => setSelectedStaffId(e.target.value)}
+className="w-full rounded-xl border border-slate-300 px-3.5 py-3 text-sm bg-white"
+>
+-- 본인의 이름을 선택하세요 --
+{stores.map((st) => {
+const members = activeStaffList.filter((m) => m.storeId === st.id);
+if (members.length === 0) return null;
+return (
+
+{members.map((m) => (
+{m.name} ({m.role})
+))}
+
+);
+})}
+
+
+) : (
+
+
+관리자 계정 선택
+<select
+value={selectedAdminId}
+onChange={(e) => setSelectedAdminId(e.target.value)}
+className="w-full rounded-xl border border-slate-300 px-3.5 py-3 text-sm bg-white font-medium"
+>
+본사 마스터 관리자
+{adminAccounts.map((adm) => (
+{adm.name} (관리자)
+))}
+
+
+
+본사 관리자 전용 모드입니다. 전 매장 스케줄 승인/반려, USD 매출·수량 마감, 연차 승인 및 계정 관리를 수행합니다.
+
+
+)}
+
+
+{loginMode === 'admin' ? '관리자 PIN (4자리)' : '개인 PIN 번호 (4자리)'}
+
+
+
+<input
+type="password"
+inputMode="numeric"
+maxLength={4}
+value={pinInput}
+onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ''))}
+placeholder="••••"
+className="w-full rounded-xl border border-slate-300 pl-10 pr-4 py-3 text-center tracking-[0.5em] text-lg font-bold"
+/>
+
+
+{loginError && (
+
+{loginError}
+
+)}
+
+접속하기
+
+
+
+
+);
+}
+
+const pendingLeavesCount = leaveRequests.filter((r) => r.status === '대기').length;
+const pendingSchedulesCount = stores.filter((st) => isStoreMonthPending(st.id)).length;
+const currentFilterStoreId = isAdmin ? selectedStoreId : activeStaffProfile?.storeId;
+const currentApprovalInfo =
+currentFilterStoreId && currentFilterStoreId !== 'ALL'
+? getStoreApprovalInfo(currentFilterStoreId)
+: null;
+const currentStoreStatus = currentApprovalInfo?.status || 'DRAFT';
+const currentStoreApproved = currentStoreStatus === 'APPROVED';
+const currentStorePending = currentStoreStatus === 'PENDING';
+const currentStoreRejected = currentStoreStatus === 'REJECTED';
+const activeRemainLeave = leaveSummaryByStaff[activeStaffProfile?.id]?.remaining ?? activeStaffProfile?.annualLeave ?? 0;
+
+return (
+
+
+
+
+
+
+
+
+
+
+{isAdmin ? adminDisplayName : (myStoreObj?.name || '매장')}
+
+
+{isAdmin
+? 'ADMIN'
+: activeStaffProfile?.name + ' (' + activeStaffProfile?.role + ' · 잔여연차 ' + formatDays(activeRemainLeave) + '일)'}
+
+
+
+{syncStatus}
+
+
+
+
+로그아웃
+
+
+
+<button
+onClick={() => setActiveTab('schedule')}
+className={activeTab === 'schedule'
+? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+: 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+>
+근무 스케줄
+{isAdmin && pendingSchedulesCount > 0 && (
+{pendingSchedulesCount}
+)}
+
+<button
+onClick={() => setActiveTab('auto_schedule')}
+className={activeTab === 'auto_schedule'
+? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+: 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+>
+매장별 자동 스케줄표
+
+<button
+onClick={() => setActiveTab('sales')}
+className={activeTab === 'sales'
+? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+: 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+>
+일매출(USD) · 수량입력
+
+<button
+onClick={() => setActiveTab('daily_sales_summary')}
+className={activeTab === 'daily_sales_summary'
+? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+: 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+>
+일별 매출 합계
+
+<button
+onClick={() => setActiveTab('staff_sales')}
+className={activeTab === 'staff_sales'
+? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+: 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+>
+사원별 배분집계
+
+<button
+onClick={() => setActiveTab('leave')}
+className={activeTab === 'leave'
+? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+: 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+>
+휴가 · 연차관리
+{isAdmin && pendingLeavesCount > 0 && (
+{pendingLeavesCount}
+)}
+
+<button
+onClick={() => setActiveTab('settings')}
+className={activeTab === 'settings'
+? 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-indigo-400 text-white whitespace-nowrap flex items-center gap-1.5'
+: 'px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-slate-400 whitespace-nowrap flex items-center gap-1.5'}
+>
+{isAdmin ? '관리자 · 직원 · 연차 · PIN' : '내 PIN 변경'}
+
+  <div className="max-w-7xl mx-auto px-4 pt-4">
+    <div className="bg-white rounded-xl border border-slate-200 p-3 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+      <div className="flex items-center gap-2">
+        <button onClick={() => setCurrentDate(new Date(year, month - 1, 1))} className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100">
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <span className="font-bold text-base min-w-[110px] text-center">{year}년 {month + 1}월</span>
+        <button onClick={() => setCurrentDate(new Date(year, month + 1, 1))} className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100">
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+      {isAdmin && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-slate-500">지점 필터:</span>
+          <select
+            value={selectedStoreId}
+            onChange={(e) => {
+              setSelectedStoreId(e.target.value);
+              if (e.target.value !== 'ALL') {
+                setAutoTargetStoreId(e.target.value);
+              }
+            }}
+            className="text-xs sm:text-sm border border-slate-300 rounded-lg px-3 py-1.5 bg-white font-medium"
+          >
+            <option value="ALL">전체 7개 매장 보기</option>
+            {stores.map((st) => (<option key={st.id} value={st.id}>{st.name}</option>))}
+          </select>
+        </div>
+      )}
+    </div>
+  </div>
+
+  <main className="max-w-7xl mx-auto px-4 pt-4 space-y-6">
+    {activeTab === 'schedule' && (
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="font-bold text-base">월간 근무 스케줄표 (A조 · B조 · C조 · F조 · 연장+)</h2>
+              {currentFilterStoreId && currentFilterStoreId !== 'ALL' && (
+                <span className={currentStoreApproved
+                  ? 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-800 inline-flex items-center gap-1'
+                  : currentStorePending
+                  ? 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-amber-100 text-amber-800 inline-flex items-center gap-1'
+                  : currentStoreRejected
+                  ? 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-rose-100 text-rose-800 inline-flex items-center gap-1'
+                  : 'text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-slate-100 text-slate-700 inline-flex items-center gap-1'}>
+                  {currentStoreApproved ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                  {currentStoreApproved
+                    ? '관리자 승인 완료'
+                    : currentStorePending
+                    ? '관리자 승인 대기 중'
+                    : currentStoreRejected
+                    ? '수정요청(반려)됨'
+                    : '작성 중'}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">
+              우측에서 <strong>조별 근무일수</strong>를, 맨 하단에서 <strong>날짜별 조별 출근 인원</strong>을 확인할 수 있으며 엑셀(CSV) 양식 업로드도 지원합니다.
+            </p>
+            {overStreakStaffNames.length > 0 && (
+              <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 mt-1.5 font-medium">
+                4일 이상 연속 근무 주의: {overStreakStaffNames.join(', ')} (3일 연속 근무 후 휴무 배치를 권장합니다)
+              </p>
+            )}
+            {currentStoreRejected && currentApprovalInfo?.rejectReason && (
+              <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 mt-1.5">
+                반려 사유: {currentApprovalInfo.rejectReason}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {(isManager || isAdmin) && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleDownloadScheduleTemplate}
+                  className="flex items-center gap-1.5 text-xs bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold px-3 py-2 rounded-lg border border-slate-300"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-600" /><span>양식 다운로드</span>
+                </button>
+                <input
+                  ref={scheduleFileInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={handleUploadScheduleExcel}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  disabled={!canUploadScheduleExcel}
+                  onClick={() => scheduleFileInputRef.current?.click()}
+                  className="flex items-center gap-1.5 text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold px-3 py-2 rounded-lg border border-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Upload className="w-3.5 h-3.5" /><span>엑셀(CSV) 업로드</span>
+                </button>
+              </>
+            )}
+            {isManager && activeStaffProfile?.storeId && (
+              <>
+                {(currentStoreStatus === 'DRAFT' || currentStoreStatus === 'REJECTED') && (
+                  <button
+                    type="button"
+                    onClick={() => handleRequestScheduleApproval(activeStaffProfile.storeId)}
+                    className="flex items-center gap-1.5 text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-3 py-2 rounded-lg shadow-sm"
+                  >
+                    <Send className="w-3.5 h-3.5" /><span>스케줄 승인 요청</span>
+                  </button>
+                )}
+                {currentStorePending && (
+                  <span className="text-xs bg-amber-50 text-amber-800 border border-amber-200 font-semibold px-3 py-2 rounded-lg">
+                    승인 심사 중
+                  </span>
+                )}
+                {currentStoreApproved && (
+                  <span className="text-xs bg-emerald-50 text-emerald-800 border border-emerald-200 font-semibold px-3 py-2 rounded-lg">
+                    승인 완료
+                  </span>
+                )}
+              </>
+            )}
+            {isAdmin && selectedStoreId !== 'ALL' && (
+              <div className="flex items-center gap-1.5">
+                {currentStoreStatus !== 'APPROVED' ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDecideScheduleApproval(selectedStoreId, 'APPROVED')}
+                    className="flex items-center gap-1 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-3 py-2 rounded-lg"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" /><span>스케줄 승인</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleDecideScheduleApproval(selectedStoreId, 'DRAFT')}
+                    className="flex items-center gap-1 text-xs bg-amber-100 hover:bg-amber-200 text-amber-900 font-semibold px-3 py-2 rounded-lg border border-amber-300"
+                  >
+                    <Unlock className="w-3.5 h-3.5" /><span>승인 해제</span>
+                  </button>
+                )}
+                {currentStoreStatus !== 'REJECTED' && (
+                  <button
+                    type="button"
+                    onClick={() => handleDecideScheduleApproval(selectedStoreId, 'REJECTED')}
+                    className="flex items-center gap-1 text-xs bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold px-3 py-2 rounded-lg border border-rose-200"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" /><span>수정요청(반려)</span>
+                  </button>
+                )}
               </div>
+            )}
+            <button
+              type="button"
+              onClick={handleDownloadScheduleExcel}
+              className="flex items-center gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-3 py-2 rounded-lg shadow-sm"
+            >
+              <Download className="w-3.5 h-3.5" /><span>엑셀(CSV) 다운로드</span>
+            </button>
+          </div>
+        </div>
+
+        {scheduleImportFeedback && (
+          <div className="px-4 py-3 bg-emerald-50 border-b border-emerald-200 text-xs text-emerald-950 flex items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="font-bold flex items-center gap-1.5 text-emerald-800">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>
+                  [{scheduleImportFeedback.fileName}] 업로드 완료: 직원 {scheduleImportFeedback.matchedStaffCount}명 · 총 {scheduleImportFeedback.appliedCellsCount}칸 반영됨
+                </span>
+              </div>
+              {scheduleImportFeedback.skippedRows.length > 0 && (
+                <div className="text-amber-800">
+                  매장 불일치/잠금으로 제외된 행: {scheduleImportFeedback.skippedRows.join(', ')}
+                </div>
+              )}
+              {scheduleImportFeedback.invalidCells.length > 0 && (
+                <div className="text-rose-700">
+                  인식되지 않은 코드(건너뜀): {scheduleImportFeedback.invalidCells.slice(0, 8).join(', ')}
+                  {scheduleImportFeedback.invalidCells.length > 8 ? ' 외 ' + (scheduleImportFeedback.invalidCells.length - 8) + '건' : ''}
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setScheduleImportFeedback(null)}
+              className="text-emerald-700 hover:text-emerald-950 font-semibold shrink-0"
+            >
+              닫기
+            </button>
+          </div>
+        )}
+
+        <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap gap-2 text-xs">
+          {SHIFT_TYPES.map((t) => (
+            <span key={t.code} className={'px-2.5 py-1 rounded-md border font-medium ' + t.color}>
+              {t.code}: {t.label}
+            </span>
+          ))}
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-100 text-slate-700">
+                <th className="sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 px-3 py-2.5 text-left min-w-[160px]">
+                  직원 (매장·잔여연차)
+                </th>
+                {daysInMonth.map((d) => {
+                  const isSun = d.dayOfWeek === 0;
+                  const isSat = d.dayOfWeek === 6;
+                  return (
+                    <th
+                      key={d.dateStr}
+                      className={'border-b border-r border-slate-200 px-1.5 py-2 text-center min-w-[54px] ' +
+                        (d.isRedDay ? 'text-rose-600 bg-rose-50/70' : isSun ? 'text-rose-600 bg-rose-50/60' : isSat ? 'text-blue-600 bg-blue-50/40' : '')}
+                    >
+                      <div className="font-bold">{d.day}</div>
+                      <div className="text-[10px]">{d.dayName}</div>
+                    </th>
+                  );
+                })}
+                <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-indigo-50/80 text-indigo-900">
+                  근무날수
+                </th>
+                <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[148px] bg-violet-50/80 text-violet-950">
+                  조별 근무일수
+                </th>
+                <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[58px] bg-sky-100/80 text-sky-900">
+                  연장(+)
+                </th>
+                <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[60px] bg-slate-100 text-slate-800">
+                  휴무날수
+                </th>
+                <th className="border-b border-slate-200 px-2 py-2 text-center min-w-[64px] bg-amber-50/80 text-amber-900">
+                  연차 사용수
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleStaff.map((stf) => {
+                const stName = stores.find((s) => s.id === stf.storeId)?.name || '';
+                const remLeave = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
+                const sum = scheduleSummaryByStaff[stf.id] || {
+                  workDays: 0,
+                  overtimeDays: 0,
+                  offDays: 0,
+                  leaveUsed: 0,
+                  maxStreak: 0,
+                  groupDays: { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0 }
+                };
+                const activeGroupEntries = BASE_WORK_GROUPS
+                  .map((g) => ({ grp: g.replace('조', ''), days: sum.groupDays?.[g] || 0 }))
+                  .filter((item) => item.days > 0);
+
+                return (
+                  <tr key={stf.id} className="hover:bg-slate-50/70">
+                    <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2">
+                      <div className="font-semibold text-slate-800 flex items-center gap-1.5 flex-wrap">
+                        <span>{stf.name}</span>
+                        <span className="text-[10px] font-normal text-slate-500">{stf.role}</span>
+                        {sum.maxStreak >= 4 && (
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-100 text-rose-700 font-bold">
+                            {sum.maxStreak}연근
+                          </span>
+                        )}
+                        {stf.status === 'RESIGNED' && (
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-100 text-rose-700 font-bold">
+                            퇴사({stf.resignedAt})
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-slate-500 flex items-center justify-between gap-1 mt-0.5">
+                        <span className="truncate">{stName}</span>
+                        <span className="font-semibold text-indigo-600 shrink-0">연차 {formatDays(remLeave)}일</span>
+                      </div>
+                    </td>
+                    {daysInMonth.map((d) => {
+                      if (isStaffHiddenOnDate(stf, d.dateStr)) {
+                        return (
+                          <td
+                            key={d.dateStr}
+                            className="border-b border-r border-slate-200 p-1 text-center bg-slate-100/80 text-slate-300"
+                          >
+                            <span className="text-[10px]">-</span>
+                          </td>
+                        );
+                      }
+                      const editable = canEditScheduleForStaff(stf, d.dateStr);
+                      const val = schedules[d.dateStr + '_' + stf.id] || '';
+                      const shiftObj = SHIFT_TYPES.find((s) => s.code === val);
+                      return (
+                        <td key={d.dateStr} className="border-b border-r border-slate-200 p-1 text-center">
+                          <select
+                            disabled={!editable}
+                            value={val}
+                            onChange={(e) => handleScheduleChange(d.dateStr, stf, e.target.value)}
+                            className={'w-full rounded px-1 py-1.5 text-[11px] font-semibold border cursor-pointer disabled:cursor-default disabled:opacity-80 ' +
+                              (shiftObj ? shiftObj.color : 'bg-white text-slate-400 border-slate-200')}
+                          >
+                            <option value="">-</option>
+                            {SHIFT_TYPES.map((t) => (
+                              <option key={t.code} value={t.code}>{t.code}</option>
+                            ))}
+                          </select>
+                        </td>
+                      );
+                    })}
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-bold text-indigo-700 bg-indigo-50/30">
+                      {sum.workDays}일
+                    </td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-center bg-violet-50/30">
+                      {activeGroupEntries.length > 0 ? (
+                        <div className="flex flex-wrap items-center justify-center gap-1">
+                          {activeGroupEntries.map((gItem) => (
+                            <span
+                              key={gItem.grp}
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-white text-slate-800 border border-violet-200"
+                            >
+                              {gItem.grp} {gItem.days}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-slate-400">-</span>
+                      )}
+                    </td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-extrabold text-sky-800 bg-sky-50/50">
+                      {sum.overtimeDays}일
+                    </td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-700 bg-slate-50/60">
+                      {sum.offDays}일
+                    </td>
+                    <td className="border-b border-slate-200 px-2 py-2 text-center font-bold text-amber-800 bg-amber-50/40">
+                      {formatDays(sum.leaveUsed)}일
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="bg-indigo-50/90 font-semibold text-slate-800">
+                <td className="sticky left-0 z-10 bg-indigo-100/90 border-t-2 border-r border-slate-300 px-3 py-2 text-xs">
+                  <div className="font-bold text-slate-900">조별 출근 인원</div>
+                  <div className="text-[10px] font-normal text-slate-600 mt-0.5 space-y-0.5">
+                    <div className="text-sky-800 font-semibold">A조 (A/A+)</div>
+                    <div className="text-indigo-800 font-semibold">B조 (B/B+)</div>
+                    <div className="text-purple-800 font-semibold">C조 (C/C+)</div>
+                    <div className="text-cyan-800 font-semibold">F조</div>
+                    <div className="text-slate-900 font-bold border-t border-indigo-200 pt-0.5">총 근무(연장)</div>
+                  </div>
+                </td>
+                {daysInMonth.map((d) => {
+                  const c = dailyGroupCounts[d.dateStr] || {
+                    'A조': 0,
+                    'B조': 0,
+                    'C조': 0,
+                    'F조': 0,
+                    total: 0,
+                    overtime: 0
+                  };
+                  return (
+                    <td key={d.dateStr} className="border-t-2 border-r border-slate-300 px-1 py-1.5 text-center align-bottom">
+                      <div className="text-[10px] leading-tight space-y-0.5">
+                        <div className="text-sky-700 font-semibold">A {c['A조']}</div>
+                        <div className="text-indigo-700 font-semibold">B {c['B조']}</div>
+                        <div className="text-purple-700 font-semibold">C {c['C조']}</div>
+                        <div className="text-cyan-700 font-semibold">F {c['F조']}</div>
+                        <div className="text-[11px] font-extrabold text-indigo-900 border-t border-indigo-200 pt-0.5">
+                          {c.total}명{c.overtime > 0 ? ' (+' + c.overtime + ')' : ''}
+                        </div>
+                      </div>
+                    </td>
+                  );
+                })}
+                <td colSpan={5} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-600 align-middle">
+                  우측 열: 개인별 조별 근무일수 · 하단 행: 날짜별 조별 출근인원
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    )}
+
+    {activeTab === 'auto_schedule' && (
+      <div className="space-y-4">
+        <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-bold text-base flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-indigo-600" />
+                <span>{year}년 {month + 1}월 매장별 자동 스케줄표 추천</span>
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                <strong>최대 3일 연속 근무 제한(3일 근무 후 반드시 휴무 제안)</strong>을 지키며, 당월 토·일·공휴일({monthRedDayCount}일) 수만큼 <strong>휴무</strong>가 배정됩니다.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {isAdmin ? (
+                <select
+                  value={effectiveAutoStoreId}
+                  onChange={(e) => setAutoTargetStoreId(e.target.value)}
+                  className="text-xs sm:text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white font-semibold"
+                >
+                  {stores.map((st) => (
+                    <option key={st.id} value={st.id}>{st.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <span className="text-xs font-bold px-3 py-2 rounded-lg bg-slate-100 text-slate-700 border border-slate-200">
+                  {autoStoreObj?.name || '내 매장'}
+                </span>
+              )}
+
               <button
                 type="button"
-                onClick={handleDownloadDailySalesExcel}
-                className="flex items-center gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-3.5 py-2 rounded-lg shadow-sm"
+                onClick={handleGenerateAutoSchedule}
+                className="flex items-center gap-1.5 text-xs sm:text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4 py-2 rounded-lg shadow-sm"
               >
-                <Download className="w-3.5 h-3.5" /><span>일별 매출합계 엑셀(CSV) 다운로드</span>
+                <Sparkles className="w-4 h-4" />
+                <span>자동 스케줄 생성</span>
               </button>
+
+              {Object.keys(autoDraftSchedule).length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleApplyAutoScheduleToMain}
+                  className="flex items-center gap-1.5 text-xs sm:text-sm bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-lg shadow-sm"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>당월 스케줄표에 반영</span>
+                </button>
+              )}
             </div>
+          </div>
+
+          {autoNotice && (
+            <div
+              className={
+                autoStoreStaff.length === 0
+                  ? 'mt-3 rounded-lg bg-rose-50 border border-rose-200 px-3.5 py-2.5 text-xs text-rose-800 font-semibold'
+                  : 'mt-3 rounded-lg bg-indigo-50 border border-indigo-200 px-3.5 py-2.5 text-xs text-indigo-900 font-medium'
+              }
+            >
+              {autoNotice}
+            </div>
+          )}
+        </div>
+
+        {autoAnalysisMeta ? (
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs text-slate-700 font-medium">
+                <span className="font-bold text-indigo-700">{autoAnalysisMeta.storeName}</span> · 최대 연속근무: <span className="font-bold text-emerald-700">3일 제한 적용</span> · 토·일·공휴일 기준 휴무: <span className="font-bold">{autoAnalysisMeta.redDayCountInMonth}일</span>
+              </div>
+              <div className="text-[11px] text-slate-500">
+                요일별 목표 출근: 일 {autoAnalysisMeta.weekdayTargetHeadcount[0]} · 월 {autoAnalysisMeta.weekdayTargetHeadcount[1]} · 화 {autoAnalysisMeta.weekdayTargetHeadcount[2]} · 수 {autoAnalysisMeta.weekdayTargetHeadcount[3]} · 목 {autoAnalysisMeta.weekdayTargetHeadcount[4]} · 금 {autoAnalysisMeta.weekdayTargetHeadcount[5]} · 토 {autoAnalysisMeta.weekdayTargetHeadcount[6]}
+              </div>
+            </div>
+
+            {autoAnalysisMeta.topPairs.length > 0 && (
+              <div className="px-4 py-2.5 border-b border-slate-200 flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-semibold text-slate-600">동반 출근 매출 시너지 상위:</span>
+                {autoAnalysisMeta.topPairs.map((p, idx) => (
+                  <span key={idx} className="px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200 font-medium">
+                    {p.names} ({formatUsd(p.avgSales)} / {p.daysCount}일)
+                  </span>
+                ))}
+              </div>
+            )}
 
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-100 text-slate-700">
-                    <th className="sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 px-3 py-2.5 text-left min-w-[105px]">일자</th>
-                    {targetStoresForDailyMatrix.map((st) => (
-                      <th key={st.id} className="border-b border-r border-slate-200 px-3 py-2.5 text-right min-w-[130px]">{st.name}</th>
-                    ))}
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right min-w-[125px] bg-indigo-50/70 text-indigo-900">일별 합계</th>
+                    <th className="sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 px-3 py-2.5 text-left min-w-[155px]">
+                      직원 (직책)
+                    </th>
+                    {daysInMonth.map((d) => {
+                      const isSun = d.dayOfWeek === 0;
+                      const isSat = d.dayOfWeek === 6;
+                      return (
+                        <th
+                          key={d.dateStr}
+                          className={'border-b border-r border-slate-200 px-1.5 py-2 text-center min-w-[50px] ' +
+                            (d.isRedDay ? 'text-rose-600 bg-rose-50/70' : isSun ? 'text-rose-600 bg-rose-50/60' : isSat ? 'text-blue-600 bg-blue-50/40' : '')}
+                        >
+                          <div className="font-bold">{d.day}</div>
+                          <div className="text-[10px]">{d.dayName}</div>
+                        </th>
+                      );
+                    })}
+                    <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-indigo-50/80 text-indigo-900">
+                      근무날수
+                    </th>
+                    <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[60px] bg-sky-100/80 text-sky-900">
+                      연장(+)
+                    </th>
+                    <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-slate-100 text-slate-800">
+                      휴무날수
+                    </th>
+                    <th className="border-b border-slate-200 px-2 py-2 text-center min-w-[62px] bg-amber-50/80 text-amber-900">
+                      연차날수
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {dailyStoreMatrix.rows.map((r) => (
-                    <tr key={r.dateStr} className="hover:bg-slate-50/80">
-                      <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2 font-semibold">{r.day}일 ({r.dayName})</td>
-                      {targetStoresForDailyMatrix.map((st) => {
-                        const cell = r.cells[st.id] || { amount: 0, quantity: 0 };
-                        return (
-                          <td key={st.id} className="border-b border-r border-slate-200 px-3 py-2 text-right">
-                            <div className="font-semibold text-slate-800">{formatUsd(cell.amount)}</div>
-                            <div className="text-[11px] text-emerald-700 font-medium">{formatQty(cell.quantity)} PCS</div>
-                          </td>
-                        );
-                      })}
-                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right bg-indigo-50/40">
-                        <div className="font-bold text-indigo-700">{formatUsd(r.dayAmount)}</div>
-                        <div className="text-[11px] text-emerald-700 font-semibold">{formatQty(r.dayQuantity)} PCS</div>
-                      </td>
-                    </tr>
-                  ))}
+                  {autoStoreStaff.map((stf) => {
+                    const wCnt = autoAnalysisMeta.workCountByStaff[stf.id] ?? 0;
+                    const otCnt = autoAnalysisMeta.overtimeCountByStaff?.[stf.id] ?? 0;
+                    const oCnt = autoAnalysisMeta.offCountByStaff[stf.id] ?? 0;
+                    const lCnt = autoAnalysisMeta.leaveCountByStaff?.[stf.id] ?? 0;
+                    return (
+                      <tr key={stf.id} className="hover:bg-slate-50/70">
+                        <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2">
+                          <div className="font-semibold text-slate-800 flex items-center gap-1 flex-wrap">
+                            <span>{stf.name}</span>
+                            <span className="text-[10px] font-normal text-slate-500">{stf.role}</span>
+                            {stf.resignedAt && (
+                              <span className="text-[10px] px-1 rounded bg-rose-100 text-rose-700 font-bold">
+                                퇴사 {stf.resignedAt}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        {daysInMonth.map((d) => {
+                          if (isStaffHiddenOnDate(stf, d.dateStr)) {
+                            return (
+                              <td
+                                key={d.dateStr}
+                                className="border-b border-r border-slate-200 p-1 text-center bg-slate-100/80 text-slate-300"
+                              >
+                                <span className="text-[10px]">-</span>
+                              </td>
+                            );
+                          }
+                          const code = autoDraftSchedule[d.dateStr + '_' + stf.id] || '';
+                          const shiftObj = SHIFT_TYPES.find((s) => s.code === code);
+                          return (
+                            <td key={d.dateStr} className="border-b border-r border-slate-200 p-1 text-center">
+                              <span className={'inline-block w-full py-1 rounded text-[11px] font-bold border ' +
+                                (shiftObj ? shiftObj.color : 'bg-slate-50 text-slate-400 border-slate-200')}>
+                                {code || '-'}
+                              </span>
+                            </td>
+                          );
+                        })}
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-bold text-indigo-700 bg-indigo-50/30">
+                          {wCnt}일
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-extrabold text-sky-800 bg-sky-50/50">
+                          {otCnt}일
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-700 bg-slate-50/60">
+                          {oCnt}일
+                        </td>
+                        <td className="border-b border-slate-200 px-2 py-2 text-center font-bold text-amber-800 bg-amber-50/40">
+                          {formatDays(lCnt)}일
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
                 <tfoot>
-                  <tr className="bg-indigo-50 font-bold text-slate-900">
-                    <td className="sticky left-0 z-10 bg-indigo-100 border-t-2 border-r border-slate-300 px-3 py-2.5">월 누적 합계</td>
-                    {targetStoresForDailyMatrix.map((st) => {
-                      const tot = dailyStoreMatrix.storeTotals[st.id] || { amount: 0, quantity: 0 };
+                  <tr className="bg-indigo-50/80 font-semibold text-slate-900">
+                    <td className="sticky left-0 z-10 bg-indigo-100/80 border-t-2 border-r border-slate-300 px-3 py-2 text-xs">
+                      <div>조별 출근 인원</div>
+                      <div className="text-[10px] font-normal text-slate-600">A조 · C조 · 합계</div>
+                    </td>
+                    {daysInMonth.map((d) => {
+                      const gc = autoDailyGroupCounts[d.dateStr] || { aCount: 0, cCount: 0, total: 0 };
                       return (
-                        <td key={st.id} className="border-t-2 border-r border-slate-300 px-3 py-2.5 text-right">
-                          <div className="font-extrabold text-slate-900">{formatUsd(tot.amount)}</div>
-                          <div className="text-[11px] text-emerald-800 font-semibold">{formatQty(tot.quantity)} PCS</div>
+                        <td key={d.dateStr} className="border-t-2 border-r border-slate-300 px-1 py-1.5 text-center">
+                          <div className="text-[10px] text-sky-700 font-semibold">A {gc.aCount}</div>
+                          <div className="text-[10px] text-purple-700 font-semibold">C {gc.cCount}</div>
+                          <div className="text-[11px] font-extrabold text-indigo-800 border-t border-indigo-200/70 mt-0.5 pt-0.5">
+                            {gc.total}명
+                          </div>
                         </td>
                       );
                     })}
-                    <td className="border-t-2 border-r border-slate-300 px-3 py-2.5 text-right bg-indigo-100">
-                      <div className="font-extrabold text-indigo-800">{formatUsd(dailyStoreMatrix.grandTotalAmount)}</div>
-                      <div className="text-[11px] text-emerald-800 font-bold">{formatQty(dailyStoreMatrix.grandTotalQuantity)} PCS</div>
+                    <td colSpan={4} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-600">
+                      우측 일수 집계 참조
                     </td>
                   </tr>
                 </tfoot>
               </table>
             </div>
           </div>
-        )}
-
-        {activeTab === 'staff_sales' && (
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="font-bold text-base">{year}년 {month + 1}월 사원별 출근일 매출 배분 · 조별 평균 집계</h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  당일 출근한 모든 직원(A+·B+·C+ 연장 포함)에게 일매출·수량을 동일 배분하여 출근일 평균과 조별 평균을 산출합니다.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={handleDownloadStaffSalesExcel}
-                className="flex items-center gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-3.5 py-2 rounded-lg shadow-sm"
-              >
-                <Download className="w-3.5 h-3.5" /><span>사원별 배분집계 엑셀(CSV) 다운로드</span>
-              </button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-xs">
-                <thead>
-                  <tr className="bg-slate-100 text-slate-700">
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-left">
-                      <button type="button" onClick={() => handleHeaderSort('staffName')} className="font-bold flex items-center">
-                        사원명 {renderSortIcon('staffName')}
-                      </button>
-                    </th>
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-left">
-                      <button type="button" onClick={() => handleHeaderSort('storeName')} className="font-bold flex items-center">
-                        소속 매장 {renderSortIcon('storeName')}
-                      </button>
-                    </th>
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center">
-                      <button type="button" onClick={() => handleHeaderSort('workDaysCount')} className="font-bold inline-flex items-center">
-                        출근일수 {renderSortIcon('workDaysCount')}
-                      </button>
-                    </th>
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center bg-sky-50/70">
-                      <button type="button" onClick={() => handleHeaderSort('overtimeDaysCount')} className="font-bold inline-flex items-center text-sky-900">
-                        연장(+) {renderSortIcon('overtimeDaysCount')}
-                      </button>
-                    </th>
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
-                      <button type="button" onClick={() => handleHeaderSort('totalAllocatedRounded')} className="font-bold inline-flex items-center">
-                        총 배분매출 {renderSortIcon('totalAllocatedRounded')}
-                      </button>
-                    </th>
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
-                      <button type="button" onClick={() => handleHeaderSort('totalAllocatedQtyRounded')} className="font-bold inline-flex items-center">
-                        총 배분수량 {renderSortIcon('totalAllocatedQtyRounded')}
-                      </button>
-                    </th>
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right bg-indigo-50/70">
-                      <button type="button" onClick={() => handleHeaderSort('overallAvg')} className="font-bold inline-flex items-center text-indigo-900">
-                        일 평균매출 {renderSortIcon('overallAvg')}
-                      </button>
-                    </th>
-                    <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
-                      <button type="button" onClick={() => handleHeaderSort('overallAvgQty')} className="font-bold inline-flex items-center">
-                        일 평균수량 {renderSortIcon('overallAvgQty')}
-                      </button>
-                    </th>
-                    {BASE_WORK_GROUPS.map((g) => (
-                      <th key={g} className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
-                        <button type="button" onClick={() => handleHeaderSort('group_' + g)} className="font-bold inline-flex items-center">
-                          {g} 평균 {renderSortIcon('group_' + g)}
-                        </button>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedStaffSalesAnalytics.map((row) => (
-                    <tr key={row.staff.id} className="hover:bg-slate-50">
-                      <td className="border-b border-r border-slate-200 px-3 py-2.5 font-semibold">{row.staff.name}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2.5 text-slate-600">{row.storeName}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2.5 text-center font-semibold">{row.workDaysCount}일</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2.5 text-center font-bold text-sky-800 bg-sky-50/40">{row.overtimeDaysCount}일</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold">{formatUsd(row.totalAllocatedRounded)}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold text-emerald-700">{formatQty(row.totalAllocatedQtyRounded)} PCS</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-bold text-indigo-700 bg-indigo-50/40">{formatUsd(row.overallAvg)}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold text-emerald-700">{formatQty(row.overallAvgQty)} PCS</td>
-                      {BASE_WORK_GROUPS.map((g) => (
-                        <td key={g} className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
-                          {row.groupAverages[g] !== null ? formatUsd(row.groupAverages[g]) : '-'}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+        ) : (
+          <div className="bg-white rounded-xl border border-dashed border-slate-300 p-8 text-center text-xs text-slate-500">
+            매장을 선택한 뒤 <strong>[자동 스케줄 생성]</strong> 버튼을 누르면 추천 스케줄표가 표시됩니다.
           </div>
         )}
+      </div>
+    )}
 
-        {activeTab === 'leave' && (
-          <div className="space-y-6">
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-              <div className="p-4 border-b border-slate-200">
-                <h2 className="font-bold text-base">입사년월 기준 연차 현황 (발생 · 사용 · 잔여)</h2>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-slate-100 text-slate-700">
-                      <th className="border-b border-r border-slate-200 px-3 py-2.5 text-left">성명</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2.5 text-left">소속 매장</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center">입사년월</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center">발생연차</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center">사용연차</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center bg-indigo-50/70 text-indigo-900">잔여연차</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {leaveOverviewRows.map((item) => (
-                      <tr key={item.staff.id} className="hover:bg-slate-50">
-                        <td className="border-b border-r border-slate-200 px-3 py-2 font-semibold">{item.staff.name}</td>
-                        <td className="border-b border-r border-slate-200 px-3 py-2 text-slate-600">{item.storeName}</td>
-                        <td className="border-b border-r border-slate-200 px-3 py-2 text-center">{formatHireYearMonth(item.staff.hireDate)}</td>
-                        <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-semibold">{formatDays(item.granted)}일</td>
-                        <td className="border-b border-r border-slate-200 px-3 py-2 text-center text-amber-700 font-semibold">{formatDays(item.used)}일</td>
-                        <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-extrabold text-indigo-700 bg-indigo-50/40">{formatDays(item.remaining)}일</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {!isAdmin && (
-                <form onSubmit={handleSubmitLeave} className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
-                  <h2 className="font-bold text-base">연차 · 반차 신청</h2>
-                  <div className="text-xs bg-indigo-50 text-indigo-800 px-3 py-2 rounded-lg font-semibold">
-                    현재 잔여 연차: {formatDays(activeRemainLeave)}일
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">휴가 일자</label>
-                    <input type="date" value={leaveDate} onChange={(e) => setLeaveDate(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" required />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">휴가 구분</label>
-                    <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
-                      <option value="연차">연차 (1일 차감)</option>
-                      <option value="반차">반차 (0.5일 차감)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">사유</label>
-                    <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="개인 사유" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-                  </div>
-                  <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">휴가 신청 제출</button>
-                </form>
-              )}
-
-              <div className={(isAdmin ? 'lg:col-span-3' : 'lg:col-span-2') + ' bg-white rounded-xl border border-slate-200 p-5 shadow-sm'}>
-                <h2 className="font-bold text-base mb-3">휴가 신청 내역</h2>
-                {leaveRequests.length === 0 ? (
-                  <p className="text-xs text-slate-400 py-8 text-center">등록된 휴가 신청 내역이 없습니다.</p>
-                ) : (
-                  <div className="space-y-2.5">
-                    {leaveRequests
-                      .filter((r) => isAdmin || r.staffId === activeStaffProfile?.id)
-                      .map((req) => (
-                        <div key={req.id} className="border border-slate-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-sm">{req.staffName}</span>
-                              <span className="text-xs text-slate-500">{req.storeName}</span>
-                              <span className="text-xs font-semibold px-2 py-0.5 rounded bg-amber-100 text-amber-800">{req.type}</span>
-                            </div>
-                            <div className="text-xs text-slate-600 mt-1">일자: <strong>{req.date}</strong> · 사유: {req.reason}</div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className={'text-xs font-bold px-2.5 py-1 rounded-full ' +
-                              (req.status === '승인' ? 'bg-emerald-100 text-emerald-800' : req.status === '반려' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800')}>
-                              {req.status}
-                            </span>
-                            {isAdmin && req.status === '대기' && (
-                              <>
-                                <button type="button" onClick={() => handleLeaveAction(req, '승인')} className="p-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700"><CheckCircle2 className="w-4 h-4" /></button>
-                                <button type="button" onClick={() => handleLeaveAction(req, '반려')} className="p-1.5 rounded-lg bg-rose-600 text-white hover:bg-rose-700"><XCircle className="w-4 h-4" /></button>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                )}
-              </div>
-            </div>
+    {activeTab === 'sales' && (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <form onSubmit={handleSaveSales} className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
+          <h2 className="font-bold text-base flex items-center gap-2"><FileSpreadsheet className="w-4 h-4 text-indigo-600" /><span>일매출(USD) · 수량 등록</span></h2>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">매출 일자</label>
+            <input type="date" value={salesDate} onChange={(e) => setSalesDate(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" required />
           </div>
-        )}
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">대상 매장</label>
+            {isAdmin ? (
+              <select value={salesStoreInput} onChange={(e) => setSalesStoreInput(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+                {stores.map((st) => (<option key={st.id} value={st.id}>{st.name}</option>))}
+              </select>
+            ) : (
+              <input type="text" readOnly value={myStoreObj?.name || ''} className="w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700" />
+            )}
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">일매출 금액 (USD $)</label>
+            <input type="number" min="0" step="1" value={salesAmountInput} onChange={(e) => setSalesAmountInput(e.target.value)} placeholder="예: 4500" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold" required />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">판매 수량 (PCS / 개)</label>
+            <input type="number" min="0" step="1" value={salesQuantityInput} onChange={(e) => setSalesQuantityInput(e.target.value)} placeholder="예: 35" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold" required />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">메모 (선택)</label>
+            <input type="text" value={salesNoteInput} onChange={(e) => setSalesNoteInput(e.target.value)} placeholder="프로모션, 단체 관광객 등" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          </div>
+          <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">매출·수량 저장하기</button>
+        </form>
 
-        {activeTab === 'settings' && (
-          !isAdmin ? (
-            <div className="max-w-md bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-              <h2 className="font-bold text-base mb-3">내 PIN 번호 변경</h2>
-              <form onSubmit={handleSelfPinChange} className="space-y-3">
-                <input type="password" inputMode="numeric" maxLength={4} value={newSelfPin} onChange={(e) => setNewSelfPin(e.target.value.replace(/\D/g, ''))} placeholder="새 PIN 4자리" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold" />
-                <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">PIN 변경 저장</button>
-              </form>
-            </div>
-          ) : (
-            <div className="space-y-6">
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="font-bold text-base">7개 매장 · 34명 직원 명단 클라우드 동기화</h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    현재 등록된 실제 7개 매장 및 34명 직원 명단으로 클라우드 데이터를 최신화합니다.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleSyncDefaultRosterToCloud}
-                  className="flex items-center gap-1.5 text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4 py-2.5 rounded-lg shadow-sm"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>7개 매장 · 34명 직원 동기화</span>
-                </button>
-              </div>
-
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                <h2 className="font-bold text-base mb-3">직원 추가 (입사년월 기준 연차 자동 계산)</h2>
-                <form onSubmit={handleAddStaff} className="grid grid-cols-1 sm:grid-cols-7 gap-2.5">
-                  <input type="text" value={newStaffName} onChange={(e) => setNewStaffName(e.target.value)} placeholder="성명" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-                  <select value={newStaffStore} onChange={(e) => setNewStaffStore(e.target.value)} className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm bg-white">
-                    {stores.map((st) => (<option key={st.id} value={st.id}>{st.name}</option>))}
-                  </select>
-                  <select value={newStaffRole} onChange={(e) => setNewStaffRole(e.target.value)} className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm bg-white">
-                    {ROLE_OPTIONS.map((r) => (<option key={r} value={r}>{r}</option>))}
-                  </select>
-                  <input type="date" value={newStaffHireDate} onChange={(e) => handleHireDateInputChange(e.target.value)} className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm" />
-                  <input type="number" step="0.5" min="0" value={newStaffAnnualLeave} onChange={(e) => setNewStaffAnnualLeave(e.target.value)} placeholder="연차일수" className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm" />
-                  <input type="text" maxLength={4} value={newStaffPin} onChange={(e) => setNewStaffPin(e.target.value.replace(/\D/g, ''))} placeholder="PIN 4자리" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-                  <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg px-3 py-2 text-sm flex items-center justify-center gap-1">
-                    <Plus className="w-4 h-4" /><span>추가</span>
-                  </button>
-                </form>
-              </div>
-
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm overflow-x-auto">
-                <h2 className="font-bold text-base mb-3">전체 직원 명단 및 연차/PIN 관리 ({staffList.length}명)</h2>
-                <table className="w-full border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-slate-100 text-slate-700">
-                      <th className="border-b border-r border-slate-200 px-3 py-2 text-left">성명</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2 text-left">매장</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2 text-left">직책</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2 text-center">입사일</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2 text-center">발생연차</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2 text-center">잔여연차</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2 text-center">퇴사일</th>
-                      <th className="border-b border-r border-slate-200 px-3 py-2 text-center">PIN</th>
-                      <th className="border-b border-slate-200 px-3 py-2 text-center">관리</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {staffList.map((stf) => {
-                      const stName = stores.find((s) => s.id === stf.storeId)?.name || '';
-                      const summary = leaveSummaryByStaff[stf.id] || { granted: 0, remaining: 0 };
-                      return (
-                        <tr key={stf.id} className={stf.status === 'RESIGNED' ? 'bg-slate-50 text-slate-400' : 'hover:bg-slate-50'}>
-                          <td className="border-b border-r border-slate-200 px-3 py-2 font-semibold">{stf.name}</td>
-                          <td className="border-b border-r border-slate-200 px-3 py-2">{stName}</td>
-                          <td className="border-b border-r border-slate-200 px-3 py-2">
-                            <select value={stf.role} onChange={(e) => handleUpdateStaffRole(stf.id, e.target.value)} className="border border-slate-200 rounded px-1.5 py-1 bg-white text-slate-800">
-                              {ROLE_OPTIONS.map((r) => (<option key={r} value={r}>{r}</option>))}
-                            </select>
-                          </td>
-                          <td className="border-b border-r border-slate-200 px-3 py-2 text-center">
-                            <input type="date" value={stf.hireDate || ''} onChange={(e) => handleUpdateStaffHireDate(stf.id, e.target.value)} className="border border-slate-200 rounded px-1.5 py-1 text-slate-800" />
-                          </td>
-                          <td className="border-b border-r border-slate-200 px-3 py-2 text-center">
-                            <input
-                              type="number"
-                              step="0.5"
-                              min="0"
-                              value={summary.granted}
-                              onChange={(e) => handleUpdateStaffLeaveDays(stf.id, e.target.value)}
-                              className="w-16 border border-slate-200 rounded px-1.5 py-1 text-center font-semibold text-slate-800"
-                            />
-                          </td>
-                          <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-bold text-indigo-700">{formatDays(summary.remaining)}일</td>
-                          <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-mono text-rose-700">
-                            {stf.status === 'RESIGNED' ? stf.resignedAt || '-' : '-'}
-                          </td>
-                          <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-mono">{stf.pin}</td>
-                          <td className="border-b border-slate-200 px-3 py-2 text-center">
-                            <div className="inline-flex items-center gap-1">
-                              <button type="button" onClick={() => handleApplyAutoLeaveByHireDate(stf.id)} className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700">자동연차</button>
-                              <button type="button" onClick={() => handleResetStaffPin(stf.id, stf.name)} className="px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700">PIN</button>
-                              {stf.status !== 'RESIGNED' ? (
-                                <button type="button" onClick={() => openResignModal(stf)} className="px-2 py-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-700">퇴사</button>
-                              ) : (
-                                <button type="button" onClick={() => handleReinstateStaff(stf.id, stf.name)} className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700">복직</button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                  <h2 className="font-bold text-base mb-3">매장명 및 월 목표 매출(USD) 설정</h2>
-                  <div className="space-y-2.5">
-                    {stores.map((st) => (
-                      <div key={st.id} className="flex items-center gap-2">
-                        <input type="text" value={st.name} onChange={(e) => handleUpdateStore(st.id, 'name', e.target.value)} className="flex-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold" />
-                        <input type="number" value={st.targetSales} onChange={(e) => handleUpdateStore(st.id, 'targetSales', e.target.value)} className="w-28 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs text-right font-semibold" />
-                      </div>
-                    ))}
+        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <h2 className="font-bold text-base mb-3">{year}년 {month + 1}월 매장별 누적 매출(USD) · 수량 현황</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {stores.map((st) => {
+              const sumObj = monthlySalesSummary[st.id] || { amount: 0, quantity: 0 };
+              const monthTarget = getStoreMonthlyTarget(st.id, currentMonthPrefix);
+              const achRate = monthTarget > 0 ? Math.round((sumObj.amount / monthTarget) * 100) : 0;
+              return (
+                <div key={st.id} className="border border-slate-200 rounded-xl p-4">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-sm">{st.name}</span>
+                    <span className="text-xs font-bold text-indigo-600">{achRate}%</span>
+                  </div>
+                  <div className="text-lg font-extrabold mt-1">{formatUsd(sumObj.amount)}</div>
+                  <div className="text-xs font-semibold text-emerald-700 mt-0.5">누적 판매수량: {formatQty(sumObj.quantity)} PCS</div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">
+                    {year}년 {month + 1}월 목표: {formatUsd(monthTarget)}
                   </div>
                 </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    )}
 
-                <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
-                  <h2 className="font-bold text-base">마스터 PIN 및 당월 데이터 초기화</h2>
-                  <form onSubmit={handleUpdateAdminPin} className="flex gap-2">
-                    <input type="password" inputMode="numeric" maxLength={4} value={newAdminPinInput} onChange={(e) => setNewAdminPinInput(e.target.value.replace(/\D/g, ''))} placeholder="새 마스터 PIN 4자리" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold" />
-                    <button type="submit" className="bg-slate-800 hover:bg-slate-900 text-white font-semibold px-4 py-2 rounded-lg text-xs">PIN 변경</button>
-                  </form>
-                  <div className="pt-2 border-t border-slate-200 flex flex-wrap gap-2">
-                    <button type="button" onClick={() => handleClearMonthData('schedule')} className="px-3 py-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold border border-rose-200">
-                      {year}년 {month + 1}월 스케줄 삭제
-                    </button>
-                    <button type="button" onClick={() => handleClearMonthData('sales')} className="px-3 py-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold border border-rose-200">
-                      {year}년 {month + 1}월 매출 삭제
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )
-        )}
-      </main>
-
-      {resignModalStaff && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
-          <form
-            onSubmit={handleConfirmResignStaff}
-            className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4"
-          >
-            <h3 className="font-bold text-base text-slate-900">
-              {resignModalStaff.name} 님 퇴사 처리
-            </h3>
-            <p className="text-xs text-slate-500">
-              입력한 <strong>퇴사일 다음 날</strong>부터 스케줄표 및 자동 스케줄에서 표시되지 않습니다.
+    {activeTab === 'daily_sales_summary' && (
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-bold text-base">{year}년 {month + 1}월 일별 · 매장별 매출(USD) 및 수량 합계</h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              매출 발생일({dailyStoreMatrix.activeSalesDaysCount}일) 일평균 매출: <span className="font-bold text-indigo-700">{formatUsd(dailyStoreMatrix.avgDailyAmount)}</span>
             </p>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">퇴사 날짜 선택</label>
-              <input
-                type="date"
-                value={resignDateInput}
-                onChange={(e) => setResignDateInput(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold"
-                required
-              />
-            </div>
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setResignModalStaff(null)}
-                className="px-3.5 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                취소
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-xs font-semibold text-white"
-              >
-                퇴사 확정
-              </button>
-            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleDownloadDailySalesExcel}
+            className="flex items-center gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-3.5 py-2 rounded-lg shadow-sm"
+          >
+            <Download className="w-3.5 h-3.5" /><span>일별 매출합계 엑셀(CSV) 다운로드</span>
+          </button>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-100 text-slate-700">
+                <th className="sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 px-3 py-2.5 text-left min-w-[105px]">일자</th>
+                {targetStoresForDailyMatrix.map((st) => (
+                  <th key={st.id} className="border-b border-r border-slate-200 px-3 py-2.5 text-right min-w-[130px]">{st.name}</th>
+                ))}
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right min-w-[125px] bg-indigo-50/70 text-indigo-900">일별 합계</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dailyStoreMatrix.rows.map((r) => (
+                <tr key={r.dateStr} className="hover:bg-slate-50/80">
+                  <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2 font-semibold">{r.day}일 ({r.dayName})</td>
+                  {targetStoresForDailyMatrix.map((st) => {
+                    const cell = r.cells[st.id] || { amount: 0, quantity: 0 };
+                    return (
+                      <td key={st.id} className="border-b border-r border-slate-200 px-3 py-2 text-right">
+                        <div className="font-semibold text-slate-800">{formatUsd(cell.amount)}</div>
+                        <div className="text-[11px] text-emerald-700 font-medium">{formatQty(cell.quantity)} PCS</div>
+                      </td>
+                    );
+                  })}
+                  <td className="border-b border-r border-slate-200 px-3 py-2 text-right bg-indigo-50/40">
+                    <div className="font-bold text-indigo-700">{formatUsd(r.dayAmount)}</div>
+                    <div className="text-[11px] text-emerald-700 font-semibold">{formatQty(r.dayQuantity)} PCS</div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="bg-indigo-50 font-bold text-slate-900">
+                <td className="sticky left-0 z-10 bg-indigo-100 border-t-2 border-r border-slate-300 px-3 py-2.5">월 누적 합계</td>
+                {targetStoresForDailyMatrix.map((st) => {
+                  const tot = dailyStoreMatrix.storeTotals[st.id] || { amount: 0, quantity: 0 };
+                  return (
+                    <td key={st.id} className="border-t-2 border-r border-slate-300 px-3 py-2.5 text-right">
+                      <div className="font-extrabold text-slate-900">{formatUsd(tot.amount)}</div>
+                      <div className="text-[11px] text-emerald-800 font-semibold">{formatQty(tot.quantity)} PCS</div>
+                    </td>
+                  );
+                })}
+                <td className="border-t-2 border-r border-slate-300 px-3 py-2.5 text-right bg-indigo-100">
+                  <div className="font-extrabold text-indigo-800">{formatUsd(dailyStoreMatrix.grandTotalAmount)}</div>
+                  <div className="text-[11px] text-emerald-800 font-bold">{formatQty(dailyStoreMatrix.grandTotalQuantity)} PCS</div>
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    )}
+
+    {activeTab === 'staff_sales' && (
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-bold text-base">{year}년 {month + 1}월 사원별 출근일 매출 배분 · 조별 평균 집계</h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              당일 출근한 모든 직원(A+·B+·C+ 연장 포함)에게 일매출·수량을 동일 배분하여 출근일 평균과 조별 평균을 산출합니다.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleDownloadStaffSalesExcel}
+            className="flex items-center gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-3.5 py-2 rounded-lg shadow-sm"
+          >
+            <Download className="w-3.5 h-3.5" /><span>사원별 배분집계 엑셀(CSV) 다운로드</span>
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-100 text-slate-700">
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-left">
+                  <button type="button" onClick={() => handleHeaderSort('staffName')} className="font-bold flex items-center">
+                    사원명 {renderSortIcon('staffName')}
+                  </button>
+                </th>
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-left">
+                  <button type="button" onClick={() => handleHeaderSort('storeName')} className="font-bold flex items-center">
+                    소속 매장 {renderSortIcon('storeName')}
+                  </button>
+                </th>
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center">
+                  <button type="button" onClick={() => handleHeaderSort('workDaysCount')} className="font-bold inline-flex items-center">
+                    출근일수 {renderSortIcon('workDaysCount')}
+                  </button>
+                </th>
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center bg-sky-50/70">
+                  <button type="button" onClick={() => handleHeaderSort('overtimeDaysCount')} className="font-bold inline-flex items-center text-sky-900">
+                    연장(+) {renderSortIcon('overtimeDaysCount')}
+                  </button>
+                </th>
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
+                  <button type="button" onClick={() => handleHeaderSort('totalAllocatedRounded')} className="font-bold inline-flex items-center">
+                    총 배분매출 {renderSortIcon('totalAllocatedRounded')}
+                  </button>
+                </th>
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
+                  <button type="button" onClick={() => handleHeaderSort('totalAllocatedQtyRounded')} className="font-bold inline-flex items-center">
+                    총 배분수량 {renderSortIcon('totalAllocatedQtyRounded')}
+                  </button>
+                </th>
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right bg-indigo-50/70">
+                  <button type="button" onClick={() => handleHeaderSort('overallAvg')} className="font-bold inline-flex items-center text-indigo-900">
+                    일 평균매출 {renderSortIcon('overallAvg')}
+                  </button>
+                </th>
+                <th className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
+                  <button type="button" onClick={() => handleHeaderSort('overallAvgQty')} className="font-bold inline-flex items-center">
+                    일 평균수량 {renderSortIcon('overallAvgQty')}
+                  </button>
+                </th>
+                {BASE_WORK_GROUPS.map((g) => (
+                  <th key={g} className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
+                    <button type="button" onClick={() => handleHeaderSort('group_' + g)} className="font-bold inline-flex items-center">
+                      {g} 평균 {renderSortIcon('group_' + g)}
+                    </button>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedStaffSalesAnalytics.map((row) => (
+                <tr key={row.staff.id} className="hover:bg-slate-50">
+                  <td className="border-b border-r border-slate-200 px-3 py-2.5 font-semibold">{row.staff.name}</td>
+                  <td className="border-b border-r border-slate-200 px-3 py-2.5 text-slate-600">{row.storeName}</td>
+                  <td className="border-b border-r border-slate-200 px-3 py-2.5 text-center font-semibold">{row.workDaysCount}일</td>
+                  <td className="border-b border-r border-slate-200 px-3 py-2.5 text-center font-bold text-sky-800 bg-sky-50/40">{row.overtimeDaysCount}일</td>
+                  <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold">{formatUsd(row.totalAllocatedRounded)}</td>
+                  <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold text-emerald-700">{formatQty(row.totalAllocatedQtyRounded)} PCS</td>
+                  <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-bold text-indigo-700 bg-indigo-50/40">{formatUsd(row.overallAvg)}</td>
+                  <td className="border-b border-r border-slate-200 px-3 py-2.5 text-right font-semibold text-emerald-700">{formatQty(row.overallAvgQty)} PCS</td>
+                  {BASE_WORK_GROUPS.map((g) => (
+                    <td key={g} className="border-b border-r border-slate-200 px-3 py-2.5 text-right">
+                      {row.groupAverages[g] !== null ? formatUsd(row.groupAverages[g]) : '-'}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    )}
+
+    {activeTab === 'leave' && (
+      <div className="space-y-6">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-slate-200">
+            <h2 className="font-bold text-base">입사년월 기준 연차 현황 (발생 · 사용 · 잔여)</h2>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-xs">
+              <thead>
+                <tr className="bg-slate-100 text-slate-700">
+                  <th className="border-b border-r border-slate-200 px-3 py-2.5 text-left">성명</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2.5 text-left">소속 매장</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center">입사년월</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center">발생연차</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center">사용연차</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2.5 text-center bg-indigo-50/70 text-indigo-900">잔여연차</th>
+                </tr>
+              </thead>
+              <tbody>
+                {leaveOverviewRows.map((item) => (
+                  <tr key={item.staff.id} className="hover:bg-slate-50">
+                    <td className="border-b border-r border-slate-200 px-3 py-2 font-semibold">{item.staff.name}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-slate-600">{item.storeName}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-center">{formatHireYearMonth(item.staff.hireDate)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-semibold">{formatDays(item.granted)}일</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-center text-amber-700 font-semibold">{formatDays(item.used)}일</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-extrabold text-indigo-700 bg-indigo-50/40">{formatDays(item.remaining)}일</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {!isAdmin && (
+            <form onSubmit={handleSubmitLeave} className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
+              <h2 className="font-bold text-base">연차 · 반차 신청</h2>
+              <div className="text-xs bg-indigo-50 text-indigo-800 px-3 py-2 rounded-lg font-semibold">
+                현재 잔여 연차: {formatDays(activeRemainLeave)}일
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">휴가 일자</label>
+                <input type="date" value={leaveDate} onChange={(e) => setLeaveDate(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" required />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">휴가 구분</label>
+                <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+                  <option value="연차">연차 (1일 차감)</option>
+                  <option value="반차">반차 (0.5일 차감)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">사유</label>
+                <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="개인 사유" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              </div>
+              <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">휴가 신청 제출</button>
+            </form>
+          )}
+
+          <div className={(isAdmin ? 'lg:col-span-3' : 'lg:col-span-2') + ' bg-white rounded-xl border border-slate-200 p-5 shadow-sm'}>
+            <h2 className="font-bold text-base mb-3">휴가 신청 내역</h2>
+            {leaveRequests.length === 0 ? (
+              <p className="text-xs text-slate-400 py-8 text-center">등록된 휴가 신청 내역이 없습니다.</p>
+            ) : (
+              <div className="space-y-2.5">
+                {leaveRequests
+                  .filter((r) => isAdmin || r.staffId === activeStaffProfile?.id)
+                  .map((req) => (
+                    <div key={req.id} className="border border-slate-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm">{req.staffName}</span>
+                          <span className="text-xs text-slate-500">{req.storeName}</span>
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded bg-amber-100 text-amber-800">{req.type}</span>
+                        </div>
+                        <div className="text-xs text-slate-600 mt-1">일자: <strong>{req.date}</strong> · 사유: {req.reason}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={'text-xs font-bold px-2.5 py-1 rounded-full ' +
+                          (req.status === '승인' ? 'bg-emerald-100 text-emerald-800' : req.status === '반려' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800')}>
+                          {req.status}
+                        </span>
+                        {isAdmin && req.status === '대기' && (
+                          <>
+                            <button type="button" onClick={() => handleLeaveAction(req, '승인')} className="p-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700"><CheckCircle2 className="w-4 h-4" /></button>
+                            <button type="button" onClick={() => handleLeaveAction(req, '반려')} className="p-1.5 rounded-lg bg-rose-600 text-white hover:bg-rose-700"><XCircle className="w-4 h-4" /></button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )}
+
+    {activeTab === 'settings' && (
+      !isAdmin ? (
+        <div className="max-w-md bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <h2 className="font-bold text-base mb-3">내 PIN 번호 변경</h2>
+          <form onSubmit={handleSelfPinChange} className="space-y-3">
+            <input type="password" inputMode="numeric" maxLength={4} value={newSelfPin} onChange={(e) => setNewSelfPin(e.target.value.replace(/\D/g, ''))} placeholder="새 PIN 4자리" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold" />
+            <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg text-sm">PIN 변경 저장</button>
           </form>
         </div>
-      )}
+      ) : (
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-bold text-base">7개 매장 · 34명 직원 명단 클라우드 동기화</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                현재 등록된 실제 7개 매장 및 34명 직원 명단으로 클라우드 데이터를 최신화합니다.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleSyncDefaultRosterToCloud}
+              className="flex items-center gap-1.5 text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4 py-2.5 rounded-lg shadow-sm"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>7개 매장 · 34명 직원 동기화</span>
+            </button>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+            <h2 className="font-bold text-base mb-3">직원 추가 (입사년월 기준 연차 자동 계산)</h2>
+            <form onSubmit={handleAddStaff} className="grid grid-cols-1 sm:grid-cols-7 gap-2.5">
+              <input type="text" value={newStaffName} onChange={(e) => setNewStaffName(e.target.value)} placeholder="성명" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              <select value={newStaffStore} onChange={(e) => setNewStaffStore(e.target.value)} className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm bg-white">
+                {stores.map((st) => (<option key={st.id} value={st.id}>{st.name}</option>))}
+              </select>
+              <select value={newStaffRole} onChange={(e) => setNewStaffRole(e.target.value)} className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm bg-white">
+                {ROLE_OPTIONS.map((r) => (<option key={r} value={r}>{r}</option>))}
+              </select>
+              <input type="date" value={newStaffHireDate} onChange={(e) => handleHireDateInputChange(e.target.value)} className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm" />
+              <input type="number" step="0.5" min="0" value={newStaffAnnualLeave} onChange={(e) => setNewStaffAnnualLeave(e.target.value)} placeholder="연차일수" className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm" />
+              <input type="text" maxLength={4} value={newStaffPin} onChange={(e) => setNewStaffPin(e.target.value.replace(/\D/g, ''))} placeholder="PIN 4자리" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg px-3 py-2 text-sm flex items-center justify-center gap-1">
+                <Plus className="w-4 h-4" /><span>추가</span>
+              </button>
+            </form>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm overflow-x-auto">
+            <h2 className="font-bold text-base mb-3">전체 직원 명단 및 연차/PIN 관리 ({staffList.length}명)</h2>
+            <table className="w-full border-collapse text-xs">
+              <thead>
+                <tr className="bg-slate-100 text-slate-700">
+                  <th className="border-b border-r border-slate-200 px-3 py-2 text-left">성명</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2 text-left">매장</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2 text-left">직책</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2 text-center">입사일</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2 text-center">발생연차</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2 text-center">잔여연차</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2 text-center">퇴사일</th>
+                  <th className="border-b border-r border-slate-200 px-3 py-2 text-center">PIN</th>
+                  <th className="border-b border-slate-200 px-3 py-2 text-center">관리</th>
+                </tr>
+              </thead>
+              <tbody>
+                {staffList.map((stf) => {
+                  const stName = stores.find((s) => s.id === stf.storeId)?.name || '';
+                  const summary = leaveSummaryByStaff[stf.id] || { granted: 0, remaining: 0 };
+                  return (
+                    <tr key={stf.id} className={stf.status === 'RESIGNED' ? 'bg-slate-50 text-slate-400' : 'hover:bg-slate-50'}>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 font-semibold">{stf.name}</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2">{stName}</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2">
+                        <select value={stf.role} onChange={(e) => handleUpdateStaffRole(stf.id, e.target.value)} className="border border-slate-200 rounded px-1.5 py-1 bg-white text-slate-800">
+                          {ROLE_OPTIONS.map((r) => (<option key={r} value={r}>{r}</option>))}
+                        </select>
+                      </td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-center">
+                        <input type="date" value={stf.hireDate || ''} onChange={(e) => handleUpdateStaffHireDate(stf.id, e.target.value)} className="border border-slate-200 rounded px-1.5 py-1 text-slate-800" />
+                      </td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-center">
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0"
+                          value={summary.granted}
+                          onChange={(e) => handleUpdateStaffLeaveDays(stf.id, e.target.value)}
+                          className="w-16 border border-slate-200 rounded px-1.5 py-1 text-center font-semibold text-slate-800"
+                        />
+                      </td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-bold text-indigo-700">{formatDays(summary.remaining)}일</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-mono text-rose-700">
+                        {stf.status === 'RESIGNED' ? stf.resignedAt || '-' : '-'}
+                      </td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-center font-mono">{stf.pin}</td>
+                      <td className="border-b border-slate-200 px-3 py-2 text-center">
+                        <div className="inline-flex items-center gap-1">
+                          <button type="button" onClick={() => handleApplyAutoLeaveByHireDate(stf.id)} className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700">자동연차</button>
+                          <button type="button" onClick={() => handleResetStaffPin(stf.id, stf.name)} className="px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700">PIN</button>
+                          {stf.status !== 'RESIGNED' ? (
+                            <button type="button" onClick={() => openResignModal(stf)} className="px-2 py-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-700">퇴사</button>
+                          ) : (
+                            <button type="button" onClick={() => handleReinstateStaff(stf.id, stf.name)} className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700">복직</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+              <h2 className="font-bold text-base mb-1">매장명 및 {year}년 {month + 1}월 목표 매출(USD) 설정</h2>
+              <p className="text-[11px] text-slate-500 mb-3">
+                현재 선택된 <strong>{year}년 {month + 1}월</strong>에만 적용됩니다. 다른 월로 이동해 수정하면 해당 월 목표가 따로 저장됩니다.
+              </p>
+              <div className="space-y-2.5">
+                {stores.map((st) => {
+                  const monthTargetVal = getStoreMonthlyTarget(st.id, currentMonthPrefix);
+                  return (
+                    <div key={st.id} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={st.name}
+                        onChange={(e) => handleUpdateStoreName(st.id, e.target.value)}
+                        className="flex-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold"
+                      />
+                      <span className="text-[11px] text-slate-500 shrink-0">{month + 1}월목표($)</span>
+                      <input
+                        type="number"
+                        value={monthTargetVal}
+                        onChange={(e) => handleUpdateMonthlyStoreTarget(st.id, e.target.value, currentMonthPrefix)}
+                        className="w-28 rounded-lg border border-indigo-300 bg-indigo-50/30 px-2.5 py-1.5 text-xs text-right font-bold text-indigo-900"
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
+              <h2 className="font-bold text-base">마스터 PIN 및 당월 데이터 초기화</h2>
+              <form onSubmit={handleUpdateAdminPin} className="flex gap-2">
+                <input type="password" inputMode="numeric" maxLength={4} value={newAdminPinInput} onChange={(e) => setNewAdminPinInput(e.target.value.replace(/\D/g, ''))} placeholder="새 마스터 PIN 4자리" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold" />
+                <button type="submit" className="bg-slate-800 hover:bg-slate-900 text-white font-semibold px-4 py-2 rounded-lg text-xs">PIN 변경</button>
+              </form>
+              <div className="pt-2 border-t border-slate-200 flex flex-wrap gap-2">
+                <button type="button" onClick={() => handleClearMonthData('schedule')} className="px-3 py-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold border border-rose-200">
+                  {year}년 {month + 1}월 스케줄 삭제
+                </button>
+                <button type="button" onClick={() => handleClearMonthData('sales')} className="px-3 py-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold border border-rose-200">
+                  {year}년 {month + 1}월 매출 삭제
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )
+    )}
+  </main>
+
+  {resignModalStaff && (
+    <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+      <form
+        onSubmit={handleConfirmResignStaff}
+        className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4"
+      >
+        <h3 className="font-bold text-base text-slate-900">
+          {resignModalStaff.name} 님 퇴사 처리
+        </h3>
+        <p className="text-xs text-slate-500">
+          입력한 <strong>퇴사일 다음 날</strong>부터 스케줄표 및 자동 스케줄에서 표시되지 않습니다.
+        </p>
+        <div>
+          <label className="block text-xs font-semibold text-slate-700 mb-1">퇴사 날짜 선택</label>
+          <input
+            type="date"
+            value={resignDateInput}
+            onChange={(e) => setResignDateInput(e.target.value)}
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold"
+            required
+          />
+        </div>
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={() => setResignModalStaff(null)}
+            className="px-3.5 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+          >
+            취소
+          </button>
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-xs font-semibold text-white"
+          >
+            퇴사 확정
+          </button>
+        </div>
+      </form>
     </div>
-  );
+  )}
+</div>
+);
 }
