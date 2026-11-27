@@ -976,13 +976,50 @@ export default function App() {
     return activeStaffList.filter((s) => s.storeId === selectedStoreId);
   }, [currentUser, activeStaffProfile, selectedStoreId, staffList, activeStaffList]);
 
+  const scheduleSummaryByStaff = useMemo(() => {
+    const map = {};
+    visibleStaff.forEach((stf) => {
+      let workDays = 0;
+      let offDays = 0;
+      let leaveUsed = 0;
+      daysInMonth.forEach((d) => {
+        const code = schedules[d.dateStr + '_' + stf.id] || '';
+        if (WORK_GROUPS.includes(code)) {
+          workDays += 1;
+        } else if (code === '휴무') {
+          offDays += 1;
+        } else if (code === '연차') {
+          leaveUsed += 1;
+        } else if (code === '반차') {
+          leaveUsed += 0.5;
+        }
+      });
+      map[stf.id] = {
+        workDays,
+        offDays,
+        leaveUsed: Number(leaveUsed.toFixed(1))
+      };
+    });
+    return map;
+  }, [visibleStaff, daysInMonth, schedules]);
+
   const handleDownloadScheduleExcel = () => {
-    const headers = ['매장명', '성명', '직책', '잔여연차', ...daysInMonth.map((d) => d.day + '일(' + d.dayName + ')')];
+    const headers = [
+      '매장명',
+      '성명',
+      '직책',
+      '잔여연차',
+      ...daysInMonth.map((d) => d.day + '일(' + d.dayName + ')'),
+      '근무날수',
+      '휴무날수',
+      '연차 사용수'
+    ];
     const rows = visibleStaff.map((stf) => {
       const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
       const rem = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
       const dayCells = daysInMonth.map((d) => schedules[d.dateStr + '_' + stf.id] || '');
-      return [stName, stf.name, stf.role, rem, ...dayCells];
+      const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, offDays: 0, leaveUsed: 0 };
+      return [stName, stf.name, stf.role, rem, ...dayCells, sum.workDays, sum.offDays, sum.leaveUsed];
     });
     const filterLabel = isAdmin
       ? selectedStoreId === 'ALL'
@@ -1425,12 +1462,14 @@ export default function App() {
     const draft = {};
     const offCountByStaff = {};
     const workCountByStaff = {};
+    const leaveCountByStaff = {};
     const lastGroupByStaff = {};
     const groupRotationIdx = {};
 
     autoStoreStaff.forEach((stf, idx) => {
       offCountByStaff[stf.id] = 0;
       workCountByStaff[stf.id] = 0;
+      leaveCountByStaff[stf.id] = 0;
       lastGroupByStaff[stf.id] = idx % 2 === 0 ? 'C조' : 'A조';
       groupRotationIdx[stf.id] = idx % 2;
     });
@@ -1455,6 +1494,12 @@ export default function App() {
       const eligibleForWorkToday = [];
 
       autoStoreStaff.forEach((stf) => {
+        const existingShift = schedules[d.dateStr + '_' + stf.id];
+        if (existingShift === '연차' || existingShift === '반차') {
+          draft[d.dateStr + '_' + stf.id] = existingShift;
+          leaveCountByStaff[stf.id] += getLeaveCost(existingShift);
+          return;
+        }
         const needOff = redDayCountInMonth - offCountByStaff[stf.id];
         if (needOff > 0 && needOff >= remainingDaysAfterToday + 1) {
           mustTakeOffToday.push(stf);
@@ -1543,7 +1588,8 @@ export default function App() {
       redDayCountInMonth,
       topPairs: topPairsSummary.slice(0, 5),
       workCountByStaff,
-      offCountByStaff
+      offCountByStaff,
+      leaveCountByStaff
     });
     setAutoNotice(
       (autoStoreObj?.name || '') +
@@ -1558,6 +1604,25 @@ export default function App() {
         '일 기준)이 생성되었습니다.'
     );
   };
+
+  const autoDailyGroupCounts = useMemo(() => {
+    const result = {};
+    daysInMonth.forEach((d) => {
+      let aCount = 0;
+      let cCount = 0;
+      autoStoreStaff.forEach((stf) => {
+        const code = autoDraftSchedule[d.dateStr + '_' + stf.id];
+        if (code === 'A조') aCount += 1;
+        else if (code === 'C조') cCount += 1;
+      });
+      result[d.dateStr] = {
+        aCount,
+        cCount,
+        total: aCount + cCount
+      };
+    });
+    return result;
+  }, [daysInMonth, autoStoreStaff, autoDraftSchedule]);
 
   const handleApplyAutoScheduleToMain = () => {
     if (!autoAnalysisMeta || Object.keys(autoDraftSchedule).length === 0) return;
@@ -1927,7 +1992,7 @@ export default function App() {
                   )}
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  연차(1일) · 반차(0.5일) 입력 시 잔여 연차가 자동 계산됩니다.
+                  연차(1일) · 반차(0.5일) 입력 시 잔여 연차 및 우측 근무/휴무/연차 사용수가 자동 집계됩니다.
                 </p>
                 {currentStoreRejected && currentApprovalInfo?.rejectReason && (
                   <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 mt-1.5">
@@ -2028,6 +2093,15 @@ export default function App() {
                         </th>
                       );
                     })}
+                    <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-indigo-50/80 text-indigo-900">
+                      근무날수
+                    </th>
+                    <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-slate-100 text-slate-800">
+                      휴무날수
+                    </th>
+                    <th className="border-b border-slate-200 px-2 py-2 text-center min-w-[68px] bg-amber-50/80 text-amber-900">
+                      연차 사용수
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2035,6 +2109,7 @@ export default function App() {
                     const stName = stores.find((s) => s.id === stf.storeId)?.name || '';
                     const editable = canEditScheduleForStaff(stf);
                     const remLeave = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
+                    const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, offDays: 0, leaveUsed: 0 };
                     return (
                       <tr key={stf.id} className="hover:bg-slate-50/70">
                         <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2">
@@ -2067,6 +2142,15 @@ export default function App() {
                             </td>
                           );
                         })}
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-bold text-indigo-700 bg-indigo-50/30">
+                          {sum.workDays}일
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-700 bg-slate-50/60">
+                          {sum.offDays}일
+                        </td>
+                        <td className="border-b border-slate-200 px-2 py-2 text-center font-bold text-amber-800 bg-amber-50/40">
+                          {formatDays(sum.leaveUsed)}일
+                        </td>
                       </tr>
                     );
                   })}
@@ -2084,6 +2168,9 @@ export default function App() {
                         </td>
                       );
                     })}
+                    <td colSpan={3} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-500">
+                      인원별 합계 열 참조
+                    </td>
                   </tr>
                 </tfoot>
               </table>
@@ -2183,8 +2270,8 @@ export default function App() {
                   <table className="w-full border-collapse text-xs">
                     <thead>
                       <tr className="bg-slate-100 text-slate-700">
-                        <th className="sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 px-3 py-2.5 text-left min-w-[160px]">
-                          직원 (근무/휴무)
+                        <th className="sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 px-3 py-2.5 text-left min-w-[155px]">
+                          직원 (직책)
                         </th>
                         {daysInMonth.map((d) => {
                           const isSun = d.dayOfWeek === 0;
@@ -2192,7 +2279,7 @@ export default function App() {
                           return (
                             <th
                               key={d.dateStr}
-                              className={'border-b border-r border-slate-200 px-1.5 py-2 text-center min-w-[48px] ' +
+                              className={'border-b border-r border-slate-200 px-1.5 py-2 text-center min-w-[50px] ' +
                                 (isSun ? 'text-rose-600 bg-rose-50/60' : isSat ? 'text-blue-600 bg-blue-50/40' : '')}
                             >
                               <div className="font-bold">{d.day}</div>
@@ -2200,17 +2287,26 @@ export default function App() {
                             </th>
                           );
                         })}
+                        <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-indigo-50/80 text-indigo-900">
+                          근무날수
+                        </th>
+                        <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-slate-100 text-slate-800">
+                          휴무날수
+                        </th>
+                        <th className="border-b border-slate-200 px-2 py-2 text-center min-w-[62px] bg-amber-50/80 text-amber-900">
+                          연차날수
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
                       {autoStoreStaff.map((stf) => {
                         const wCnt = autoAnalysisMeta.workCountByStaff[stf.id] ?? 0;
                         const oCnt = autoAnalysisMeta.offCountByStaff[stf.id] ?? 0;
+                        const lCnt = autoAnalysisMeta.leaveCountByStaff?.[stf.id] ?? 0;
                         return (
                           <tr key={stf.id} className="hover:bg-slate-50/70">
                             <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2">
                               <div className="font-semibold text-slate-800">{stf.name} <span className="text-[10px] font-normal text-slate-500">{stf.role}</span></div>
-                              <div className="text-[10px] text-slate-500">근무 {wCnt}일 · 휴무 {oCnt}일</div>
                             </td>
                             {daysInMonth.map((d) => {
                               const code = autoDraftSchedule[d.dateStr + '_' + stf.id] || '';
@@ -2224,10 +2320,42 @@ export default function App() {
                                 </td>
                               );
                             })}
+                            <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-bold text-indigo-700 bg-indigo-50/30">
+                              {wCnt}일
+                            </td>
+                            <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-700 bg-slate-50/60">
+                              {oCnt}일
+                            </td>
+                            <td className="border-b border-slate-200 px-2 py-2 text-center font-bold text-amber-800 bg-amber-50/40">
+                              {formatDays(lCnt)}일
+                            </td>
                           </tr>
                         );
                       })}
                     </tbody>
+                    <tfoot>
+                      <tr className="bg-indigo-50/80 font-semibold text-slate-900">
+                        <td className="sticky left-0 z-10 bg-indigo-100/80 border-t-2 border-r border-slate-300 px-3 py-2 text-xs">
+                          <div>조별 출근 인원</div>
+                          <div className="text-[10px] font-normal text-slate-600">A조 · C조 · 합계</div>
+                        </td>
+                        {daysInMonth.map((d) => {
+                          const gc = autoDailyGroupCounts[d.dateStr] || { aCount: 0, cCount: 0, total: 0 };
+                          return (
+                            <td key={d.dateStr} className="border-t-2 border-r border-slate-300 px-1 py-1.5 text-center">
+                              <div className="text-[10px] text-sky-700 font-semibold">A {gc.aCount}</div>
+                              <div className="text-[10px] text-purple-700 font-semibold">C {gc.cCount}</div>
+                              <div className="text-[11px] font-extrabold text-indigo-800 border-t border-indigo-200/70 mt-0.5 pt-0.5">
+                                {gc.total}명
+                              </div>
+                            </td>
+                          );
+                        })}
+                        <td colSpan={3} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-600">
+                          우측 일수 집계 참조
+                        </td>
+                      </tr>
+                    </tfoot>
                   </table>
                 </div>
               </div>
