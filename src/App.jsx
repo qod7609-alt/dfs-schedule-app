@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Calendar as CalendarIcon, Users, Store, TrendingUp, Clock, Lock, Unlock,
   LogOut, Plus, Trash2, CheckCircle2, XCircle, Edit3, KeyRound, ChevronLeft,
   ChevronRight, AlertCircle, ShieldCheck, UserCheck, FileSpreadsheet,
-  Download, ShieldAlert, Send, RotateCcw, BarChart3, UserX, ArrowUpDown,
+  Download, Upload, ShieldAlert, Send, RotateCcw, BarChart3, UserX, ArrowUpDown,
   ArrowUp, ArrowDown, TableProperties, Sparkles, Check, RefreshCw
 } from 'lucide-react';
 import { initializeApp, getApps } from 'firebase/app';
@@ -134,6 +134,59 @@ const SHIFT_TYPES = [
   { code: '반차', label: '반차', color: 'bg-emerald-100 text-emerald-800 border-emerald-200', isWork: false }
 ];
 
+const normalizeImportedShiftCode = (rawVal) => {
+  const cleaned = String(rawVal ?? '').trim().replace(/\s+/g, '');
+  if (!cleaned || cleaned === '-') return '';
+  const upper = cleaned.toUpperCase();
+  const aliasMap = {
+    'A': 'A조', 'A조': 'A조', 'A+': 'A+', 'A조+': 'A+',
+    'B': 'B조', 'B조': 'B조', 'B+': 'B+', 'B조+': 'B+',
+    'C': 'C조', 'C조': 'C조', 'C+': 'C+', 'C조+': 'C+',
+    'F': 'F조', 'F조': 'F조',
+    '휴': '휴무', '휴무': '휴무', 'OFF': '휴무',
+    '연': '연차', '연차': '연차',
+    '반': '반차', '반차': '반차', '오전반차': '반차', '오후반차': '반차'
+  };
+  return aliasMap[upper] || null;
+};
+
+const parseCsvRows = (text) => {
+  const content = String(text || '').replace(/^\uFEFF/, '');
+  const rows = [];
+  let row = [];
+  let cur = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i];
+    const next = content[i + 1];
+    if (ch === '"') {
+      if (inQuotes && next === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      row.push(cur);
+      cur = '';
+    } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+      if (ch === '\r' && next === '\n') i++;
+      row.push(cur);
+      rows.push(row);
+      row = [];
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.length > 0 || row.length > 0) {
+    row.push(cur);
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((cell) => String(cell).trim() !== ''));
+};
+
 const getLeaveCost = (type) => {
   if (type === '연차') return 1;
   if (type === '반차') return 0.5;
@@ -258,6 +311,9 @@ export default function App() {
 
   const [resignModalStaff, setResignModalStaff] = useState(null);
   const [resignDateInput, setResignDateInput] = useState('2026-11-27');
+
+  const scheduleFileInputRef = useRef(null);
+  const [scheduleImportFeedback, setScheduleImportFeedback] = useState(null);
 
   useEffect(() => {
     let unsubscribeSnapshot = null;
@@ -521,6 +577,7 @@ export default function App() {
     setAutoDraftSchedule({});
     setAutoAnalysisMeta(null);
     setAutoNotice('');
+    setScheduleImportFeedback(null);
   };
 
   const getStoreApprovalInfo = (storeId) => {
@@ -549,6 +606,54 @@ export default function App() {
     return st === 'DRAFT' || st === 'REJECTED';
   };
 
+  const recomputeStaffLeaveBalances = (targetSchedules, targetStaffList, affectedStaffIds) => {
+    const idSet = new Set(affectedStaffIds);
+    return targetStaffList.map((s) => {
+      if (!idSet.has(s.id)) return s;
+
+      const scheduleLeaveByDate = {};
+      Object.entries(targetSchedules).forEach(([k, code]) => {
+        if (code !== '연차' && code !== '반차') return;
+        const parsed = parseScheduleKey(k);
+        if (!parsed) return;
+        if (parsed.staffId === s.id) {
+          scheduleLeaveByDate[parsed.dateStr] = getLeaveCost(code);
+        }
+      });
+
+      const approvedLeaveByDate = {};
+      leaveRequests
+        .filter((r) => r.staffId === s.id && r.status === '승인')
+        .forEach((r) => {
+          const cost = r.cost !== undefined ? Number(r.cost) : getLeaveCost(r.type);
+          if (cost > 0 && r.date) {
+            approvedLeaveByDate[r.date] = Math.max(approvedLeaveByDate[r.date] || 0, cost);
+          }
+        });
+
+      const allUsedDates = new Set([
+        ...Object.keys(scheduleLeaveByDate),
+        ...Object.keys(approvedLeaveByDate)
+      ]);
+
+      let nextUsed = 0;
+      allUsedDates.forEach((dt) => {
+        nextUsed += Math.max(scheduleLeaveByDate[dt] || 0, approvedLeaveByDate[dt] || 0);
+      });
+      nextUsed = Number(nextUsed.toFixed(1));
+
+      const summary = leaveSummaryByStaff[s.id];
+      const granted = summary ? summary.granted : Number(s.annualLeave ?? 0);
+      const nextRemaining = Math.max(0, Number((granted - nextUsed).toFixed(1)));
+
+      return {
+        ...s,
+        grantedLeave: granted,
+        annualLeave: nextRemaining
+      };
+    });
+  };
+
   const handleScheduleChange = (dateStr, staff, shiftCode) => {
     if (isStaffHiddenOnDate(staff, dateStr)) {
       alert('퇴사일 이후 날짜의 스케줄은 수정할 수 없습니다.');
@@ -575,50 +680,7 @@ export default function App() {
     if (!shiftCode) delete updatedSchedules[key];
     else updatedSchedules[key] = shiftCode;
 
-    const scheduleLeaveByDate = {};
-    Object.entries(updatedSchedules).forEach(([k, code]) => {
-      if (code !== '연차' && code !== '반차') return;
-      const parsed = parseScheduleKey(k);
-      if (!parsed) return;
-      if (parsed.staffId === staff.id) {
-        scheduleLeaveByDate[parsed.dateStr] = getLeaveCost(code);
-      }
-    });
-
-    const approvedLeaveByDate = {};
-    leaveRequests
-      .filter((r) => r.staffId === staff.id && r.status === '승인')
-      .forEach((r) => {
-        const cost = r.cost !== undefined ? Number(r.cost) : getLeaveCost(r.type);
-        if (cost > 0 && r.date) {
-          approvedLeaveByDate[r.date] = Math.max(approvedLeaveByDate[r.date] || 0, cost);
-        }
-      });
-
-    const allUsedDates = new Set([
-      ...Object.keys(scheduleLeaveByDate),
-      ...Object.keys(approvedLeaveByDate)
-    ]);
-
-    let nextUsed = 0;
-    allUsedDates.forEach((dt) => {
-      nextUsed += Math.max(scheduleLeaveByDate[dt] || 0, approvedLeaveByDate[dt] || 0);
-    });
-    nextUsed = Number(nextUsed.toFixed(1));
-
-    const summary = leaveSummaryByStaff[staff.id];
-    const granted = summary ? summary.granted : Number(staff.annualLeave ?? 0);
-    const nextRemaining = Math.max(0, Number((granted - nextUsed).toFixed(1)));
-
-    const updatedStaffList = staffList.map((s) =>
-      s.id === staff.id
-        ? {
-            ...s,
-            grantedLeave: granted,
-            annualLeave: nextRemaining
-          }
-        : s
-    );
+    const updatedStaffList = recomputeStaffLeaveBalances(updatedSchedules, staffList, [staff.id]);
 
     setSchedules(updatedSchedules);
     setStaffList(updatedStaffList);
@@ -1075,6 +1137,212 @@ export default function App() {
       .filter((stf) => (scheduleSummaryByStaff[stf.id]?.maxStreak || 0) >= 4)
       .map((stf) => stf.name + '(' + scheduleSummaryByStaff[stf.id].maxStreak + '일)');
   }, [visibleStaff, scheduleSummaryByStaff]);
+
+  const handleDownloadScheduleTemplate = () => {
+    const templateStaff = visibleStaff.filter((s) => s.status !== 'RESIGNED');
+    if (templateStaff.length === 0) {
+      alert('다운로드할 대상 매장의 재직 직원이 없습니다.');
+      return;
+    }
+
+    const headers = [
+      '직원ID(수정금지)',
+      '매장명',
+      '성명',
+      '직책',
+      ...daysInMonth.map((d) => d.day + '일(' + d.dayName + ')')
+    ];
+
+    const rows = templateStaff.map((stf) => {
+      const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
+      const dayCells = daysInMonth.map((d) => schedules[d.dateStr + '_' + stf.id] || '');
+      return [stf.id, stName, stf.name, stf.role, ...dayCells];
+    });
+
+    const guideRow = [
+      '입력안내',
+      '코드: A조, A+, B조, B+, C조, C+, F조, 휴무, 연차, 반차 (빈칸=미정)',
+      '직원ID·성명 열 유지',
+      '',
+      ...daysInMonth.map(() => '')
+    ];
+
+    const filterLabel = isAdmin
+      ? selectedStoreId === 'ALL'
+        ? '전체매장'
+        : stores.find((s) => s.id === selectedStoreId)?.name || '매장'
+      : myStoreObj?.name || '매장';
+
+    triggerCsvDownload(
+      '스케줄업로드양식_' + currentMonthPrefix + '_' + filterLabel + '.csv',
+      headers,
+      [...rows, guideRow]
+    );
+  };
+
+  const canUploadScheduleExcel = useMemo(() => {
+    if (isAdmin) return true;
+    if (!isManager || !activeStaffProfile?.storeId) return false;
+    const st = getStoreApprovalInfo(activeStaffProfile.storeId).status;
+    return st === 'DRAFT' || st === 'REJECTED';
+  }, [isAdmin, isManager, activeStaffProfile, scheduleApprovals, currentMonthPrefix]);
+
+  const handleUploadScheduleExcel = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (!canUploadScheduleExcel) {
+      alert('현재 매장 스케줄이 승인 대기 중이거나 승인 완료 상태여서 업로드할 수 없습니다.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const text = String(evt.target?.result || '');
+        const rows = parseCsvRows(text);
+        if (rows.length < 2) {
+          alert('유효한 데이터가 없는 파일입니다. 먼저 [양식 다운로드]로 받은 파일을 작성해 업로드해 주세요.');
+          return;
+        }
+
+        const headerRow = rows[0].map((h) => String(h ?? '').trim());
+        const idColIdx = headerRow.findIndex((h) => h.includes('직원ID'));
+        const nameColIdx = headerRow.findIndex((h) => h === '성명' || h.includes('성명'));
+        const storeColIdx = headerRow.findIndex((h) => h === '매장명' || h.includes('매장'));
+
+        const dayColMap = [];
+        headerRow.forEach((h, idx) => {
+          const matchDay = h.match(/^(\d{1,2})일/);
+          if (matchDay) {
+            const dNum = Number(matchDay[1]);
+            const dayObj = daysInMonth.find((d) => d.day === dNum);
+            if (dayObj) {
+              dayColMap.push({ colIdx: idx, dateStr: dayObj.dateStr });
+            }
+          } else if (/^\d{4}-\d{2}-\d{2}$/.test(h) && h.startsWith(currentMonthPrefix)) {
+            dayColMap.push({ colIdx: idx, dateStr: h });
+          }
+        });
+
+        if (dayColMap.length === 0) {
+          alert(
+            year +
+              '년 ' +
+              (month + 1) +
+              '월 날짜 열(1일~' +
+              daysInMonth.length +
+              '일)을 찾을 수 없습니다. 상단 월을 맞춘 뒤 [양식 다운로드]로 받은 파일을 사용해 주세요.'
+          );
+          return;
+        }
+
+        if (idColIdx === -1 && nameColIdx === -1) {
+          alert('파일 첫 번째 줄에 [직원ID] 또는 [성명] 열이 필요합니다.');
+          return;
+        }
+
+        const allowedStaffPool = isAdmin
+          ? selectedStoreId === 'ALL'
+            ? staffList
+            : staffList.filter((s) => s.storeId === selectedStoreId)
+          : staffList.filter((s) => s.storeId === activeStaffProfile?.storeId);
+
+        const updatedSchedules = { ...schedules };
+        const affectedStaffIds = new Set();
+        let matchedStaffCount = 0;
+        let appliedCellsCount = 0;
+        const skippedRows = [];
+        const invalidCells = [];
+
+        for (let rIdx = 1; rIdx < rows.length; rIdx++) {
+          const row = rows[rIdx];
+          const rawId = idColIdx !== -1 ? String(row[idColIdx] ?? '').trim() : '';
+          const rawName = nameColIdx !== -1 ? String(row[nameColIdx] ?? '').trim() : '';
+          const rawStore = storeColIdx !== -1 ? String(row[storeColIdx] ?? '').trim() : '';
+
+          if (rawId === '입력안내' || (!rawId && !rawName)) continue;
+
+          let targetStaff = null;
+          if (rawId) {
+            targetStaff = allowedStaffPool.find((s) => s.id === rawId);
+          }
+          if (!targetStaff && rawName) {
+            const nameMatches = allowedStaffPool.filter((s) => s.name === rawName);
+            if (nameMatches.length === 1) {
+              targetStaff = nameMatches[0];
+            } else if (nameMatches.length > 1 && rawStore) {
+              targetStaff = nameMatches.find(
+                (s) => (stores.find((st) => st.id === s.storeId)?.name || '') === rawStore
+              );
+            }
+          }
+
+          if (!targetStaff) {
+            skippedRows.push(rawName || rawId || rIdx + 1 + '행');
+            continue;
+          }
+
+          if (!canEditScheduleForStaff(targetStaff, currentMonthPrefix + '-01')) {
+            skippedRows.push(targetStaff.name + '(잠금됨)');
+            continue;
+          }
+
+          matchedStaffCount += 1;
+          affectedStaffIds.add(targetStaff.id);
+
+          dayColMap.forEach(({ colIdx, dateStr }) => {
+            if (isStaffHiddenOnDate(targetStaff, dateStr)) return;
+            const rawCell = row[colIdx];
+            const normalized = normalizeImportedShiftCode(rawCell);
+            const cellKey = dateStr + '_' + targetStaff.id;
+
+            if (normalized === null) {
+              invalidCells.push(targetStaff.name + ' ' + dateStr.slice(8) + '일("' + String(rawCell).trim() + '")');
+              return;
+            }
+
+            if (normalized === '') {
+              delete updatedSchedules[cellKey];
+            } else {
+              updatedSchedules[cellKey] = normalized;
+            }
+            appliedCellsCount += 1;
+          });
+        }
+
+        if (matchedStaffCount === 0) {
+          alert(
+            '반영 가능한 매장 직원을 찾지 못했습니다.\n' +
+              (skippedRows.length > 0 ? '제외된 항목: ' + skippedRows.slice(0, 5).join(', ') : '')
+          );
+          return;
+        }
+
+        const updatedStaffList = recomputeStaffLeaveBalances(
+          updatedSchedules,
+          staffList,
+          Array.from(affectedStaffIds)
+        );
+
+        setSchedules(updatedSchedules);
+        setStaffList(updatedStaffList);
+        saveToCloud({ schedules: updatedSchedules, staffList: updatedStaffList });
+
+        setScheduleImportFeedback({
+          fileName: file.name,
+          matchedStaffCount,
+          appliedCellsCount,
+          skippedRows,
+          invalidCells
+        });
+      } catch (err) {
+        alert('엑셀(CSV) 파일을 읽는 중 오류가 발생했습니다. CSV(UTF-8) 형식인지 확인해 주세요.');
+      }
+    };
+    reader.readAsText(file, 'UTF-8');
+  };
 
   const handleDownloadScheduleExcel = () => {
     const headers = [
@@ -2176,7 +2444,7 @@ export default function App() {
                   )}
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  연장 근무는 <strong>A+ · B+ · C+</strong>로 표기하며, 우측 합계 열에서 <strong>근무날수 · 연장(+) · 휴무날수 · 연차 사용수</strong>를 확인할 수 있습니다.
+                  매장 전용 <strong>[양식 다운로드]</strong> 후 엑셀에서 근무표를 작성해 <strong>[엑셀(CSV) 업로드]</strong>로 일괄 반영할 수 있습니다.
                 </p>
                 {overStreakStaffNames.length > 0 && (
                   <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 mt-1.5 font-medium">
@@ -2190,6 +2458,32 @@ export default function App() {
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                {(isManager || isAdmin) && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleDownloadScheduleTemplate}
+                      className="flex items-center gap-1.5 text-xs bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold px-3 py-2 rounded-lg border border-slate-300"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-600" /><span>양식 다운로드</span>
+                    </button>
+                    <input
+                      ref={scheduleFileInputRef}
+                      type="file"
+                      accept=".csv,text/csv"
+                      onChange={handleUploadScheduleExcel}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      disabled={!canUploadScheduleExcel}
+                      onClick={() => scheduleFileInputRef.current?.click()}
+                      className="flex items-center gap-1.5 text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold px-3 py-2 rounded-lg border border-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Upload className="w-3.5 h-3.5" /><span>엑셀(CSV) 업로드</span>
+                    </button>
+                  </>
+                )}
                 {isManager && activeStaffProfile?.storeId && (
                   <>
                     {(currentStoreStatus === 'DRAFT' || currentStoreStatus === 'REJECTED') && (
@@ -2252,6 +2546,37 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {scheduleImportFeedback && (
+              <div className="px-4 py-3 bg-emerald-50 border-b border-emerald-200 text-xs text-emerald-950 flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-emerald-800">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>
+                      [{scheduleImportFeedback.fileName}] 업로드 완료: 직원 {scheduleImportFeedback.matchedStaffCount}명 · 총 {scheduleImportFeedback.appliedCellsCount}칸 반영됨
+                    </span>
+                  </div>
+                  {scheduleImportFeedback.skippedRows.length > 0 && (
+                    <div className="text-amber-800">
+                      매장 불일치/잠금으로 제외된 행: {scheduleImportFeedback.skippedRows.join(', ')}
+                    </div>
+                  )}
+                  {scheduleImportFeedback.invalidCells.length > 0 && (
+                    <div className="text-rose-700">
+                      인식되지 않은 코드(건너뜀): {scheduleImportFeedback.invalidCells.slice(0, 8).join(', ')}
+                      {scheduleImportFeedback.invalidCells.length > 8 ? ' 외 ' + (scheduleImportFeedback.invalidCells.length - 8) + '건' : ''}
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setScheduleImportFeedback(null)}
+                  className="text-emerald-700 hover:text-emerald-950 font-semibold shrink-0"
+                >
+                  닫기
+                </button>
+              </div>
+            )}
 
             <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap gap-2 text-xs">
               {SHIFT_TYPES.map((t) => (
