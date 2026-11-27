@@ -284,6 +284,7 @@ export default function App() {
   const [adminPin, setAdminPin] = useState('0000');
   const [adminAccounts, setAdminAccounts] = useState([]);
   const [stores, setStores] = useState(DEFAULT_STORES);
+  const [monthlyStoreTargets, setMonthlyStoreTargets] = useState({});
   const [staffList, setStaffList] = useState(DEFAULT_STAFF);
   const [schedules, setSchedules] = useState({});
   const [scheduleApprovals, setScheduleApprovals] = useState({});
@@ -333,6 +334,7 @@ export default function App() {
           if (data.adminPin) setAdminPin(data.adminPin);
           if (data.adminAccounts) setAdminAccounts(data.adminAccounts);
           if (data.stores && data.stores.length > 0) setStores(data.stores);
+          if (data.monthlyStoreTargets) setMonthlyStoreTargets(data.monthlyStoreTargets);
           if (data.staffList && data.staffList.length > 0) setStaffList(data.staffList);
           if (data.schedules) setSchedules(data.schedules);
           if (data.scheduleApprovals) setScheduleApprovals(data.scheduleApprovals);
@@ -344,6 +346,7 @@ export default function App() {
             adminPin: '0000',
             adminAccounts: [],
             stores: DEFAULT_STORES,
+            monthlyStoreTargets: {},
             staffList: DEFAULT_STAFF,
             schedules: {},
             scheduleApprovals: {},
@@ -415,6 +418,16 @@ export default function App() {
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
   const currentMonthPrefix = year + '-' + String(month + 1).padStart(2, '0');
+
+  const getStoreMonthlyTarget = (storeObj, monthPrefix = currentMonthPrefix) => {
+    if (!storeObj) return 0;
+    const key = monthPrefix + '_' + storeObj.id;
+    const specificVal = monthlyStoreTargets[key];
+    if (specificVal !== undefined && specificVal !== null && specificVal !== '') {
+      return Number(specificVal) || 0;
+    }
+    return Number(storeObj.targetSales) || 0;
+  };
 
   const daysInMonth = useMemo(() => {
     const total = new Date(year, month + 1, 0).getDate();
@@ -1053,10 +1066,19 @@ export default function App() {
   };
 
   const handleUpdateStore = (storeId, field, value) => {
+    if (field === 'targetSales') {
+      const numericTarget = Math.max(0, Number(value) || 0);
+      const targetKey = currentMonthPrefix + '_' + storeId;
+      const updatedTargets = {
+        ...monthlyStoreTargets,
+        [targetKey]: numericTarget
+      };
+      setMonthlyStoreTargets(updatedTargets);
+      saveToCloud({ monthlyStoreTargets: updatedTargets });
+      return;
+    }
     const updated = stores.map((st) =>
-      st.id === storeId
-        ? { ...st, [field]: field === 'targetSales' ? Number(value) || 0 : value }
-        : st
+      st.id === storeId ? { ...st, [field]: value } : st
     );
     setStores(updated);
     saveToCloud({ stores: updated });
@@ -1096,6 +1118,7 @@ export default function App() {
       let leaveUsed = 0;
       let streak = 0;
       let maxStreak = 0;
+      const groupDays = { 'A조': 0, 'B조': 0, 'C조': 0, 'F조': 0 };
 
       daysInMonth.forEach((d) => {
         if (isStaffHiddenOnDate(stf, d.dateStr)) {
@@ -1110,6 +1133,10 @@ export default function App() {
           if (isOvertimeCode(code)) {
             overtimeDays += 1;
           }
+          const baseGrp = normalizeBaseGroup(code);
+          if (baseGrp && groupDays[baseGrp] !== undefined) {
+            groupDays[baseGrp] += 1;
+          }
         } else {
           streak = 0;
           if (code === '휴무') {
@@ -1121,12 +1148,20 @@ export default function App() {
           }
         }
       });
+
+      const groupBreakdownText = BASE_WORK_GROUPS
+        .filter((g) => groupDays[g] > 0)
+        .map((g) => g.replace('조', '') + ' ' + groupDays[g] + '일')
+        .join(' · ');
+
       map[stf.id] = {
         workDays,
         overtimeDays,
         offDays,
         leaveUsed: Number(leaveUsed.toFixed(1)),
-        maxStreak
+        maxStreak,
+        groupDays,
+        groupBreakdownText: groupBreakdownText || '-'
       };
     });
     return map;
@@ -1354,7 +1389,8 @@ export default function App() {
       '근무날수',
       '연장(+)',
       '휴무날수',
-      '연차 사용수'
+      '연차 사용수',
+      '조별 근무일수'
     ];
     const rows = visibleStaff.map((stf) => {
       const stName = stores.find((s) => s.id === stf.storeId)?.name || '미지정';
@@ -1362,8 +1398,25 @@ export default function App() {
       const dayCells = daysInMonth.map((d) =>
         isStaffHiddenOnDate(stf, d.dateStr) ? '' : schedules[d.dateStr + '_' + stf.id] || ''
       );
-      const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, overtimeDays: 0, offDays: 0, leaveUsed: 0 };
-      return [stName, stf.name, stf.role, rem, ...dayCells, sum.workDays, sum.overtimeDays, sum.offDays, sum.leaveUsed];
+      const sum = scheduleSummaryByStaff[stf.id] || {
+        workDays: 0,
+        overtimeDays: 0,
+        offDays: 0,
+        leaveUsed: 0,
+        groupBreakdownText: '-'
+      };
+      return [
+        stName,
+        stf.name,
+        stf.role,
+        rem,
+        ...dayCells,
+        sum.workDays,
+        sum.overtimeDays,
+        sum.offDays,
+        sum.leaveUsed,
+        sum.groupBreakdownText
+      ];
     });
     const filterLabel = isAdmin
       ? selectedStoreId === 'ALL'
@@ -2616,8 +2669,11 @@ export default function App() {
                     <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[62px] bg-slate-100 text-slate-800">
                       휴무날수
                     </th>
-                    <th className="border-b border-slate-200 px-2 py-2 text-center min-w-[68px] bg-amber-50/80 text-amber-900">
+                    <th className="border-b border-r border-slate-200 px-2 py-2 text-center min-w-[68px] bg-amber-50/80 text-amber-900">
                       연차 사용수
+                    </th>
+                    <th className="border-b border-slate-200 px-2.5 py-2 text-left min-w-[130px] bg-purple-50/70 text-purple-950">
+                      조별 근무일수
                     </th>
                   </tr>
                 </thead>
@@ -2625,7 +2681,14 @@ export default function App() {
                   {visibleStaff.map((stf) => {
                     const stName = stores.find((s) => s.id === stf.storeId)?.name || '';
                     const remLeave = leaveSummaryByStaff[stf.id]?.remaining ?? stf.annualLeave ?? 0;
-                    const sum = scheduleSummaryByStaff[stf.id] || { workDays: 0, overtimeDays: 0, offDays: 0, leaveUsed: 0, maxStreak: 0 };
+                    const sum = scheduleSummaryByStaff[stf.id] || {
+                      workDays: 0,
+                      overtimeDays: 0,
+                      offDays: 0,
+                      leaveUsed: 0,
+                      maxStreak: 0,
+                      groupBreakdownText: '-'
+                    };
                     return (
                       <tr key={stf.id} className="hover:bg-slate-50/70">
                         <td className="sticky left-0 z-10 bg-white border-b border-r border-slate-200 px-3 py-2">
@@ -2688,31 +2751,48 @@ export default function App() {
                         <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-700 bg-slate-50/60">
                           {sum.offDays}일
                         </td>
-                        <td className="border-b border-slate-200 px-2 py-2 text-center font-bold text-amber-800 bg-amber-50/40">
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-center font-bold text-amber-800 bg-amber-50/40">
                           {formatDays(sum.leaveUsed)}일
+                        </td>
+                        <td className="border-b border-slate-200 px-2.5 py-2 text-left font-semibold text-purple-900 bg-purple-50/30 whitespace-nowrap">
+                          {sum.groupBreakdownText}
                         </td>
                       </tr>
                     );
                   })}
                 </tbody>
                 <tfoot>
-                  <tr className="bg-indigo-50/70 font-semibold text-slate-800">
-                    <td className="sticky left-0 z-10 bg-indigo-50 border-t-2 border-r border-slate-300 px-3 py-2 text-xs">
-                      일별 근무인원 (연장 포함)
+                  <tr className="bg-indigo-50/80 font-semibold text-slate-800">
+                    <td className="sticky left-0 z-10 bg-indigo-100/90 border-t-2 border-r border-slate-300 px-3 py-2 text-xs">
+                      <div className="font-bold text-slate-900">일별 조별 근무인원</div>
+                      <div className="text-[10px] font-normal text-slate-600 mt-0.5 space-y-0.5">
+                        <div>A조 · B조 · C조 · F조</div>
+                        <div className="font-bold text-indigo-800">총 출근 / 연장(+)</div>
+                      </div>
                     </td>
                     {daysInMonth.map((d) => {
-                      const c = dailyGroupCounts[d.dateStr] || { total: 0, overtime: 0 };
+                      const c = dailyGroupCounts[d.dateStr] || {
+                        'A조': 0,
+                        'B조': 0,
+                        'C조': 0,
+                        'F조': 0,
+                        total: 0,
+                        overtime: 0
+                      };
                       return (
-                        <td key={d.dateStr} className="border-t-2 border-r border-slate-300 px-1 py-2 text-center">
-                          <div className="text-xs font-bold text-indigo-700">{c.total}명</div>
-                          {c.overtime > 0 && (
-                            <div className="text-[10px] font-bold text-sky-700">+{c.overtime}</div>
-                          )}
+                        <td key={d.dateStr} className="border-t-2 border-r border-slate-300 px-1 py-1.5 text-center">
+                          <div className="text-[10px] leading-tight text-slate-700 space-y-0.5">
+                            <div>A <span className="font-bold text-sky-800">{c['A조']}</span> · B <span className="font-bold text-indigo-800">{c['B조']}</span></div>
+                            <div>C <span className="font-bold text-purple-800">{c['C조']}</span> · F <span className="font-bold text-cyan-800">{c['F조']}</span></div>
+                          </div>
+                          <div className="text-[11px] font-extrabold text-indigo-900 border-t border-indigo-200/80 mt-1 pt-0.5">
+                            {c.total}명{c.overtime > 0 ? ' (+' + c.overtime + ')' : ''}
+                          </div>
                         </td>
                       );
                     })}
-                    <td colSpan={4} className="border-t-2 border-slate-300 px-2 py-2 text-center text-[11px] text-slate-500">
-                      인원별 합계 열 참조
+                    <td colSpan={5} className="border-t-2 border-slate-300 px-2.5 py-2 text-left text-[11px] text-slate-600">
+                      인원별 합계 및 조별 근무일수 참조
                     </td>
                   </tr>
                 </tfoot>
@@ -2973,7 +3053,8 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {stores.map((st) => {
                   const sumObj = monthlySalesSummary[st.id] || { amount: 0, quantity: 0 };
-                  const achRate = st.targetSales > 0 ? Math.round((sumObj.amount / st.targetSales) * 100) : 0;
+                  const monthlyTarget = getStoreMonthlyTarget(st);
+                  const achRate = monthlyTarget > 0 ? Math.round((sumObj.amount / monthlyTarget) * 100) : 0;
                   return (
                     <div key={st.id} className="border border-slate-200 rounded-xl p-4">
                       <div className="flex items-center justify-between">
@@ -2982,7 +3063,7 @@ export default function App() {
                       </div>
                       <div className="text-lg font-extrabold mt-1">{formatUsd(sumObj.amount)}</div>
                       <div className="text-xs font-semibold text-emerald-700 mt-0.5">누적 판매수량: {formatQty(sumObj.quantity)} PCS</div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">월 목표: {formatUsd(st.targetSales)}</div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">{month + 1}월 목표: {formatUsd(monthlyTarget)}</div>
                     </div>
                   );
                 })}
@@ -3370,12 +3451,15 @@ export default function App() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-                  <h2 className="font-bold text-base mb-3">매장명 및 월 목표 매출(USD) 설정</h2>
+                  <h2 className="font-bold text-base mb-1">매장명 및 {year}년 {month + 1}월 목표 매출(USD) 설정</h2>
+                  <p className="text-xs text-slate-500 mb-3">
+                    현재 선택된 <strong>{year}년 {month + 1}월</strong>의 목표 금액만 별도로 저장됩니다.
+                  </p>
                   <div className="space-y-2.5">
                     {stores.map((st) => (
                       <div key={st.id} className="flex items-center gap-2">
                         <input type="text" value={st.name} onChange={(e) => handleUpdateStore(st.id, 'name', e.target.value)} className="flex-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold" />
-                        <input type="number" value={st.targetSales} onChange={(e) => handleUpdateStore(st.id, 'targetSales', e.target.value)} className="w-28 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs text-right font-semibold" />
+                        <input type="number" value={getStoreMonthlyTarget(st)} onChange={(e) => handleUpdateStore(st.id, 'targetSales', e.target.value)} className="w-28 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs text-right font-semibold" />
                       </div>
                     ))}
                   </div>
